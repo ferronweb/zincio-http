@@ -167,7 +167,7 @@ where
 
     #[inline]
     async fn fill_buf(&mut self) -> Result<usize, std::io::Error> {
-        if self.read_buf.remaining() < 1024 {
+        if self.read_buf.capacity() - self.read_buf.len() < 1024 {
             self.read_buf.reserve(1024);
         }
         let spare_capacity = self.read_buf.spare_capacity_mut();

@@ -1,5 +1,11 @@
 # `zincio-http` change log
 
+## `zincio-http` UNRELEASED
+
+**Not yet released**
+
+- Fixed HTTP/1.x requests being rejected with `400 Bad Request` after multiple requests in one connection.
+
 ## `zincio-http` 0.4.5
 
 **Released in September 4, 2026**

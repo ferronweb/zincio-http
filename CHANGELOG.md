@@ -1,8 +1,8 @@
 # `zincio-http` change log
 
-## `zincio-http` UNRELEASED
+## `zincio-http` 0.4.7
 
-**Not yet released**
+**Released in September 11, 2026**
 
 - Performed several optimizations for lower HTTP/2 memory usage and improved performance.
 

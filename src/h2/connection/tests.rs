@@ -2,7 +2,7 @@ use super::*;
 use crate::h2::codec::Setting;
 use crate::h2::error::Reason;
 use crate::h2::hpack::{Encoder, Header as HpackHeader};
-use crate::h2::stream::{BodyMsg, StreamMsg};
+use crate::h2::stream::StreamMsg;
 
 /// Runs a connection against a scripted peer over an in-memory
 /// duplex stream and collects the server's reply bytes.
@@ -274,11 +274,9 @@ fn stream_window_update_overflow_is_stream_error() {
     let (_client, server) = tokio::io::duplex(1 << 16);
     let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
     // Open a stream so it has a flow-control window.
-    let (body_tx, _) = kanal::bounded_async::<BodyMsg>(1);
     let (reset_tx, _) = kanal::bounded_async::<u32>(1);
     let (_, msg_rx) = kanal::bounded_async::<StreamMsg>(1);
-    conn.streams
-        .insert(1, StreamEntry::new(body_tx, reset_tx, msg_rx));
+    conn.streams.insert(1, StreamEntry::new(reset_tx, msg_rx));
     conn.handle_window_update(1, 0x7fff_ffff);
     let decoded = decode_frames(&conn.out);
     assert!(decoded.iter().any(|f| matches!(
@@ -395,11 +393,9 @@ fn local_reset_budget_can_be_disabled() {
 /// a pending-accept reset arrives in.
 #[inline]
 fn inject_pending_stream(conn: &mut Connection<tokio::io::DuplexStream>, id: u32) {
-    let (body_tx, _) = kanal::bounded_async::<BodyMsg>(1);
     let (reset_tx, _) = kanal::bounded_async::<u32>(1);
     let (_, msg_rx) = kanal::bounded_async::<StreamMsg>(1);
-    conn.streams
-        .insert(id, StreamEntry::new(body_tx, reset_tx, msg_rx));
+    conn.streams.insert(id, StreamEntry::new(reset_tx, msg_rx));
 }
 
 #[test]

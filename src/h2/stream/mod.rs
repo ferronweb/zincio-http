@@ -83,7 +83,9 @@ pub(crate) enum StreamMsg {
 /// Per-stream state kept by the connection task (RFC 9113 Section 5.1).
 pub(crate) struct StreamEntry {
     /// Request body delivery (receiver lives in the task's [`H2Body`]).
-    pub(crate) body_tx: kanal::AsyncSender<BodyMsg>,
+    /// `None` when the request ended with HEADERS (typical GET): no body
+    /// frames can arrive, so no channel is allocated at all.
+    pub(crate) body_tx: Option<kanal::AsyncSender<BodyMsg>>,
     /// Peer RST_STREAM notifications (receiver lives in the task).
     pub(crate) reset_tx: kanal::AsyncSender<u32>,
     /// Outbound response messages (sender lives in the task).
@@ -139,12 +141,11 @@ pub(crate) struct StreamEntry {
 impl StreamEntry {
     #[inline]
     pub(crate) fn new(
-        body_tx: kanal::AsyncSender<BodyMsg>,
         reset_tx: kanal::AsyncSender<u32>,
         msg_rx: kanal::AsyncReceiver<StreamMsg>,
     ) -> Self {
         StreamEntry {
-            body_tx,
+            body_tx: None,
             reset_tx,
             msg_rx,
             msg_tx: None,
@@ -182,10 +183,14 @@ impl StreamEntry {
     }
 
     /// Forwards a request body message to the task; `Ok(false)` when the
-    /// task has gone away.
+    /// task has gone away or when there is no body channel (the request
+    /// ended with HEADERS, so no body reader exists).
     #[inline]
     pub(crate) async fn send_body(&mut self, msg: BodyMsg) -> bool {
-        self.body_tx.send(msg).await.is_ok()
+        match &self.body_tx {
+            Some(tx) => tx.send(msg).await.is_ok(),
+            None => false,
+        }
     }
 
     #[inline]

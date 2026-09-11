@@ -119,14 +119,21 @@ where
         // because every send wakes the drive loop, which drains it.
         // Larger bounds only preallocate memory per stream (heap profiles
         // showed ~76 MiB across 38k streams for 32/16).
-        let (body_tx, body_rx) = kanal::bounded_async(8);
         let (reset_tx, reset_rx) = kanal::bounded_async(1);
         let (msg_tx, msg_rx) = kanal::bounded_async(8);
-        let mut entry = StreamEntry::new(body_tx, reset_tx, msg_rx);
+        let mut entry = StreamEntry::new(reset_tx, msg_rx);
         entry.send_window = self.peer.initial_window_size as i64;
         entry.msg_tx = Some(msg_tx);
-        entry.body_rx = Some(body_rx);
         entry.reset_rx = Some(reset_rx);
+        // The request body channel only exists while body frames may
+        // still arrive. A request that ended with HEADERS (typical GET)
+        // gets `Incoming::Empty` in `spawn_request`, so skip the channel
+        // entirely instead of allocating it just to signal EOF through it.
+        if !end_stream {
+            let (body_tx, body_rx) = kanal::bounded_async(8);
+            entry.body_tx = Some(body_tx);
+            entry.body_rx = Some(body_rx);
+        }
         entry.wake_tx = Some(self.wake_tx.as_ref().expect("wake sender").clone());
         entry.pending_end_stream = end_stream;
         entry.extend_block(block);
@@ -262,7 +269,7 @@ where
         // task and the request body.
         let wake_tx = entry.wake_tx.take().expect("wake sender");
         let msg_tx = entry.msg_tx.take().expect("message sender");
-        let body_rx = entry.body_rx.take().expect("body receiver");
+        let body_rx = entry.body_rx.take();
         let reset_rx = entry.reset_rx.take().expect("reset receiver");
 
         let send_continue = self.opts.send_continue_response && parsed.expect_continue;
@@ -271,8 +278,12 @@ where
 
         let mut request = Request::new(if parsed.is_connect {
             Incoming::Empty
-        } else {
+        } else if let Some(body_rx) = body_rx {
             Incoming::H2(H2Body::new(body_rx, send_continue_body.clone()))
+        } else {
+            // The request ended with HEADERS, so no body frames can
+            // arrive; expose an empty body without a channel for it.
+            Incoming::Empty
         });
         *request.method_mut() = parsed.method;
         *request.uri_mut() = parsed.uri;
@@ -409,6 +420,10 @@ where
             entry.remote_ended = true;
             if entry.content_length.is_some_and(|cl| entry.data_sum != cl) {
                 (true, false)
+            } else if entry.body_tx.is_none() {
+                // No body channel (the request ended with HEADERS):
+                // there is no body reader to signal EOF to.
+                (false, false)
             } else {
                 let ok = entry.send_body(BodyMsg::EndStream).await;
                 (false, !ok)

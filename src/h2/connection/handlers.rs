@@ -874,25 +874,36 @@ where
 
     /// Drains every stream task's outbound channel, turning messages
     /// into frames. Called after each read and whenever a wake fires.
+    /// Uses reused scratch buffers so the steady state allocates nothing;
+    /// cross-stream order was never defined (tasks run concurrently), but
+    /// each stream's FIFO order is preserved.
     #[inline]
     pub(crate) fn drain_outbound(&mut self) {
-        let pending: Vec<(u32, Vec<StreamMsg>)> = self
-            .streams
-            .iter_mut()
-            .filter_map(|(id, entry)| {
-                let mut msgs = Vec::with_capacity(entry.msg_rx.len());
-                while let Ok(Some(msg)) = entry.msg_rx.try_recv() {
-                    msgs.push(msg);
+        let mut ids = std::mem::take(&mut self.outbound_ids);
+        ids.clear();
+        for (id, entry) in self.streams.iter() {
+            if !entry.msg_rx.is_empty() {
+                ids.push(*id);
+            }
+        }
+        let mut msgs = std::mem::take(&mut self.outbound_msgs);
+        for stream_id in ids.iter() {
+            let drained = match self.streams.get_mut(stream_id) {
+                Some(entry) => {
+                    msgs.clear();
+                    while let Ok(Some(msg)) = entry.msg_rx.try_recv() {
+                        msgs.push(msg);
+                    }
+                    !msgs.is_empty()
                 }
-                if msgs.is_empty() {
-                    None
-                } else {
-                    Some((*id, msgs))
-                }
-            })
-            .collect();
-        for (stream_id, msgs) in pending {
-            let mut msgs_iter = msgs.into_iter().peekable();
+                // Removed while draining (e.g. reset by an earlier
+                // message in this same drain).
+                None => false,
+            };
+            if !drained {
+                continue;
+            }
+            let mut msgs_iter = msgs.drain(..).peekable();
             while let Some(mut msg) = msgs_iter.next() {
                 if let (
                     StreamMsg::Data { end_stream, .. },
@@ -907,9 +918,12 @@ where
                         msgs_iter.next(); // Discard the blank end_stream message
                     }
                 }
-                self.handle_stream_msg(stream_id, msg);
+                self.handle_stream_msg(*stream_id, msg);
             }
         }
+        self.outbound_ids = ids;
+        // `msgs` was fully drained above: empty, capacity kept.
+        self.outbound_msgs = msgs;
     }
 
     /// One response-side message from a stream task.

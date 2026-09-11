@@ -188,6 +188,12 @@ pub struct Connection<Io> {
     /// snapshot stream ids before pumping (avoids a per-call
     /// allocation).
     drain_ids: Vec<u32>,
+    /// Scratch buffers reused by [`Connection::drain_outbound`]: the ids
+    /// with pending messages and the drained messages themselves.
+    /// Restored (empty, capacity kept) after each drain, so the steady
+    /// state allocates nothing per read/wake.
+    outbound_ids: Vec<u32>,
+    outbound_msgs: Vec<StreamMsg>,
     /// Highest stream id opened by the peer (RFC 9113 Section 5.1.1).
     highest_stream_id: u32,
     /// A connection error is pending; the loop stops after flushing.
@@ -239,6 +245,8 @@ where
             complete_blocks: VecDeque::new(),
             max_continuation_frames: 16,
             drain_ids: Vec::new(),
+            outbound_ids: Vec::new(),
+            outbound_msgs: Vec::new(),
             highest_stream_id: 0,
             closing: false,
             graceful: false,

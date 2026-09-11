@@ -81,7 +81,8 @@ impl<Fut, ResB> StreamDriver<Fut, ResB> {
             reset_rx,
             wake_tx,
             msg_tx_fut: None,
-            queue: VecDeque::with_capacity(8),
+            // Grows on demand; steady state holds only a few messages.
+            queue: VecDeque::new(),
             done: false,
             state: StreamDriverState::Service {
                 response_fut,

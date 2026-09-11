@@ -114,9 +114,14 @@ where
                 .write_reset(&mut self.out, stream_id, Reason::RefusedStream.code());
             return;
         }
-        let (body_tx, body_rx) = kanal::bounded_async(32);
+        // Bounded small: the message channel only ever holds a few
+        // messages (headers, a handful of body chunks, trailers, close)
+        // because every send wakes the drive loop, which drains it.
+        // Larger bounds only preallocate memory per stream (heap profiles
+        // showed ~76 MiB across 38k streams for 32/16).
+        let (body_tx, body_rx) = kanal::bounded_async(8);
         let (reset_tx, reset_rx) = kanal::bounded_async(1);
-        let (msg_tx, msg_rx) = kanal::bounded_async(16);
+        let (msg_tx, msg_rx) = kanal::bounded_async(8);
         let mut entry = StreamEntry::new(body_tx, reset_tx, msg_rx);
         entry.send_window = self.peer.initial_window_size as i64;
         entry.msg_tx = Some(msg_tx);

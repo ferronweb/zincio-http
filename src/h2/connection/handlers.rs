@@ -1028,15 +1028,33 @@ where
         headers: &http::HeaderMap,
     ) {
         // Fast 3-digit status without per-response `to_string` allocation.
+        // Well-known codes reuse static bytes, skipping the 3-byte heap
+        // copy entirely (every response pays this otherwise).
         let code = status.as_u16();
         let mut status_buf = [b'0'; 3];
         status_buf[0] = b'0' + (code / 100) as u8;
         status_buf[1] = b'0' + ((code / 10) % 10) as u8;
         status_buf[2] = b'0' + (code % 10) as u8;
+        let status_value = match &status_buf {
+            b"200" => Bytes::from_static(b"200"),
+            b"201" => Bytes::from_static(b"201"),
+            b"204" => Bytes::from_static(b"204"),
+            b"301" => Bytes::from_static(b"301"),
+            b"302" => Bytes::from_static(b"302"),
+            b"304" => Bytes::from_static(b"304"),
+            b"400" => Bytes::from_static(b"400"),
+            b"401" => Bytes::from_static(b"401"),
+            b"403" => Bytes::from_static(b"403"),
+            b"404" => Bytes::from_static(b"404"),
+            b"500" => Bytes::from_static(b"500"),
+            b"502" => Bytes::from_static(b"502"),
+            b"503" => Bytes::from_static(b"503"),
+            _ => Bytes::copy_from_slice(&status_buf),
+        };
         let mut fields: SmallVec<[HpackHeader; 8]> = SmallVec::with_capacity(headers.len() + 1);
         fields.push(HpackHeader::new(
             Bytes::from_static(b":status"),
-            Bytes::copy_from_slice(&status_buf),
+            status_value,
         ));
         for (name, value) in headers.iter() {
             let name_bytes = name.as_str().as_bytes();

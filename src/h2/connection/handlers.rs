@@ -1018,11 +1018,6 @@ where
             ));
         }
         self.frame_buffer.clear();
-        // Pre-reserve to avoid per-response reallocations for typical
-        // header blocks bounded by `max_frame_size`.
-        if self.frame_buffer.capacity() < self.opts.max_frame_size as usize {
-            self.frame_buffer.reserve(self.opts.max_frame_size as usize);
-        }
         self.encoder.encode(&fields, &mut self.frame_buffer);
         // Ensure `out` can hold the field block without growing.
         if self.out.capacity() - self.out.len() < self.frame_buffer.len() + 9 {

@@ -228,7 +228,10 @@ where
             streams: FxHashMap::default(),
             conn_window: DEFAULT_INITIAL_WINDOW_SIZE as i64,
             closed_streams: FxHashSet::default(),
-            closed_order: VecDeque::with_capacity(4096),
+            // Grows on demand up to the 4096-entry LRU bound in
+            // `mark_closed`; preallocating would cost ~16 KiB per
+            // connection even when it only ever holds a few ids.
+            closed_order: VecDeque::new(),
             opts: ConnectionOptions::default(),
             local_error_resets: 0,
             pending_accept_resets: 0,
@@ -346,10 +349,13 @@ where
 
         let (wake_tx, wake_rx) = kanal::bounded_async(1);
         self.wake_tx = Some(wake_tx);
-        // Pre-reserve output buffers to avoid per-response reallocations
-        // and enable single flush after drain_outbound + pending_data.
-        self.out.reserve(64 * 1024);
-        self.frame_buffer.reserve(self.opts.max_frame_size as usize);
+        // Seed the output buffers modestly instead of pre-reserving tens
+        // of kilobytes: typical responses are far smaller than
+        // `max_frame_size`, and both buffers grow geometrically on demand.
+        // Pre-reserving 64 KiB + `max_frame_size` per connection showed up
+        // as ~65 MiB at 1000 connections in heap profiles.
+        self.out.reserve(8 * 1024);
+        self.frame_buffer.reserve(1024);
 
         let mut buf = [0u8; 8192];
         let mut wake_rx_drain = Vec::new();

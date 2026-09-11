@@ -364,14 +364,17 @@ where
             let wake_recv = wake_rx.recv().fuse();
             let read = tokio::io::AsyncReadExt::read(&mut self.io, &mut buf).fuse();
             // Graceful-shutdown signal: never fires without a token. The
-            // clone lives for the loop iteration so the boxed future can
-            // borrow it.
+            // clone lives for the loop iteration so the future can borrow
+            // it. Stack-pinned on purpose: boxing this future heap-allocated
+            // once per loop iteration in heap profiles.
             let shutdown_token = self.shutdown.clone();
-            let shutdown_fut: Pin<Box<dyn futures_util::future::FusedFuture<Output = ()> + Send>> =
-                match &shutdown_token {
-                    Some(token) => Box::pin(token.cancelled().fuse()),
-                    None => Box::pin(futures_util::future::pending().fuse()),
-                };
+            let shutdown_fut = async move {
+                match shutdown_token {
+                    Some(token) => token.cancelled().await,
+                    None => futures_util::future::pending().await,
+                }
+            }
+            .fuse();
             pin_mut!(wake_recv);
             pin_mut!(read);
             pin_mut!(shutdown_fut);

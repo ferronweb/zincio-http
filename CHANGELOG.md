@@ -1,8 +1,8 @@
 # `zincio-http` change log
 
-## `zincio-http` UNRELEASED
+## `zincio-http` 0.4.8
 
-**Not yet released**
+**Released in September 16, 2026**
 
 - Changed the default connection window size to 64KiB.
 - Fixed flow-control bug that caused stream resets when downloading large response bodies with `hyper`.

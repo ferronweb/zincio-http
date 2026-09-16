@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use crate::h2::codec::{DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_FRAME_SIZE};
+use crate::h2::codec::{
+    DEFAULT_CONNECTION_WINDOW_SIZE, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_FRAME_SIZE,
+};
 
 /// HTTP/2 server configuration.
 ///
@@ -63,7 +65,12 @@ impl Default for Http2Options {
             send_date_header: true,
             max_concurrent_streams: 200,
             initial_stream_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
-            initial_connection_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            // RFC 9113 Section 6.9.1: the connection send window starts
+            // at 65535; the peer raises it with WINDOW_UPDATE. Do not
+            // raise this without also sending a WINDOW_UPDATE that
+            // advertises the larger receive window, or the peer will
+            // treat our sends as a flow-control violation.
+            initial_connection_window_size: DEFAULT_CONNECTION_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE as u32,
             max_header_list_size: 1024 * 16,
             enable_connect_protocol: false,

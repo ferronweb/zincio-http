@@ -25,7 +25,17 @@ pub const FRAME_HEADER_LEN: usize = 9;
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 16_384;
 /// The largest settable frame payload size (2^24-1).
 pub const MAX_FRAME_SIZE_LIMIT: usize = 16_777_215;
-/// The initial connection flow-control window (RFC 9113 Section 5.2.1).
+/// The initial connection flow-control window (RFC 9113 Section 6.9.1).
+/// The connection window is always 65535 octets initially; unlike the
+/// per-stream window it cannot be raised via SETTINGS, only via
+/// WINDOW_UPDATE.
+pub const DEFAULT_CONNECTION_WINDOW_SIZE: u32 = 65_535;
+/// The initial per-stream flow-control window this server advertises via
+/// SETTINGS (RFC 9113 Section 6.5.2). The protocol default is 65535, but
+/// advertising a larger window (1MiB) reduces round-trips for large
+/// responses. This is *only* for the window we advertise; the window the
+/// peer advertises to us defaults to 65535 per RFC until its SETTINGS
+/// says otherwise.
 pub const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 1_048_576;
 /// The largest legal flow-control window (2^31-1).
 pub const MAX_WINDOW_SIZE: u32 = 2_147_483_647;

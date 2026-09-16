@@ -877,6 +877,17 @@ where
     /// Uses reused scratch buffers so the steady state allocates nothing;
     /// cross-stream order was never defined (tasks run concurrently), but
     /// each stream's FIFO order is preserved.
+    ///
+    /// Flow-control backpressure (RFC 9113 Section 6.9): when a stream
+    /// still has queued DATA that the peer's window could not absorb
+    /// (`pending_data` non-empty), its channel is left alone. The stream
+    /// task then parks on the bounded channel (capacity 8) instead of
+    /// the connection buffering an unbounded response and eventually
+    /// resetting a slow consumer (notably hyper clients fetching large
+    /// static files through a proxy, where WINDOW_UPDATEs arrive later
+    /// than the file chunks). The queued DATA is flushed by a later
+    /// WINDOW_UPDATE via `drain_pending_data`; only then is the channel
+    /// drained again.
     #[inline]
     pub(crate) fn drain_outbound(&mut self) {
         let mut ids = std::mem::take(&mut self.outbound_ids);
@@ -888,6 +899,16 @@ where
         }
         let mut msgs = std::mem::take(&mut self.outbound_msgs);
         for stream_id in ids.iter() {
+            // Leave flow-control-blocked streams in their channels so the
+            // producer blocks (backpressure) instead of growing
+            // `pending_data` without bound.
+            if self
+                .streams
+                .get(stream_id)
+                .is_some_and(|e| !e.pending_data.is_empty())
+            {
+                continue;
+            }
             let drained = match self.streams.get_mut(stream_id) {
                 Some(entry) => {
                     msgs.clear();
@@ -961,11 +982,14 @@ where
                     // continued after the trailer section).
                     return;
                 }
-                if entry.pending_data.len() >= 32 {
-                    // The window never opened: give up on the stream.
-                    self.stream_error(stream_id, Reason::InternalError);
-                    return;
-                }
+                // No queue-depth reset here: when the peer's window is
+                // exhausted the chunk stays in `pending_data` and the
+                // channel is left undrained (see `drain_outbound`), so
+                // the stream task parks on backpressure until a
+                // WINDOW_UPDATE reopens the window. Resetting a slow
+                // consumer with INTERNAL_ERROR broke large (>=10MB)
+                // static files behind hyper clients, whose WINDOW_UPDATEs
+                // legitimately lag the file chunks.
                 entry.pending_data.push_back((data, end_stream));
                 self.pump_stream_data(stream_id);
             }

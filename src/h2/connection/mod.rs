@@ -32,8 +32,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tokio_util::sync::CancellationToken;
 
 use super::codec::{
-    Frame, FrameDecoder, FrameWriter, Setting, CLIENT_PREFACE, DEFAULT_INITIAL_WINDOW_SIZE,
-    DEFAULT_MAX_FRAME_SIZE, MAX_FRAME_SIZE_LIMIT,
+    Frame, FrameDecoder, FrameWriter, Setting, CLIENT_PREFACE, DEFAULT_CONNECTION_WINDOW_SIZE,
+    DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_FRAME_SIZE, MAX_FRAME_SIZE_LIMIT,
 };
 use super::date::DateCache;
 use super::error::Reason;
@@ -91,7 +91,9 @@ impl Default for ConnectionOptions {
             send_date_header: true,
             max_concurrent_streams: 100,
             initial_stream_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
-            initial_connection_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            // RFC 9113 Section 6.9.1: the connection window starts at
+            // 65535; the peer raises it with WINDOW_UPDATE.
+            initial_connection_window_size: DEFAULT_CONNECTION_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE as u32,
             max_header_list_size: u32::MAX,
             enable_connect_protocol: false,
@@ -123,7 +125,10 @@ impl Default for PeerSettings {
         PeerSettings {
             header_table_size: 4096,
             enable_push: 1,
-            initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
+            // RFC 9113 Section 6.5.2: 65535 until the peer's SETTINGS
+            // says otherwise. Using 1MiB here would let us over-send
+            // before the peer's SETTINGS arrives.
+            initial_window_size: DEFAULT_CONNECTION_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
             max_header_list_size: u32::MAX,
         }
@@ -232,7 +237,9 @@ where
             local: PeerSettings::default(),
             preface_timeout,
             streams: FxHashMap::default(),
-            conn_window: DEFAULT_INITIAL_WINDOW_SIZE as i64,
+            // RFC 9113 Section 6.9.1: connection send window starts at
+            // 65535; the peer's WINDOW_UPDATEs raise it.
+            conn_window: DEFAULT_CONNECTION_WINDOW_SIZE as i64,
             closed_streams: FxHashSet::default(),
             // Grows on demand up to the 4096-entry LRU bound in
             // `mark_closed`; preallocating would cost ~16 KiB per

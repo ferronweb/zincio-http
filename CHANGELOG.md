@@ -1,8 +1,8 @@
 # `zincio-http` change log
 
-## `zincio-http` UNRELEASED
+## `zincio-http` 0.4.10
 
-**Not yet released**
+**Released in September 16, 2026**
 
 - Further hardened the HTTP/2 implementation against rapid-reset attacks.
 - Hardened HTTP/3 SETTINGS frame parsing.

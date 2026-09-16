@@ -43,7 +43,9 @@ pub struct Http2Options {
     /// of the connection. `None` disables the limit.
     pub(crate) max_local_error_reset_streams: Option<usize>,
     /// Maximum number of streams the peer reset before this endpoint
-    /// accepted them (their request was never dispatched). `None`
+    /// produced a final response for them (their request was never
+    /// dispatched, or was dispatched but cancelled before the handler
+    /// responded -- CVE-2023-44487 rapid reset). `None`
     /// disables the limit.
     pub(crate) max_pending_accept_reset_streams: Option<usize>,
     /// Maximum number of frames that may make up a single, not-yet-finalized
@@ -181,9 +183,11 @@ impl Http2Options {
     }
 
     /// Sets the maximum number of streams the peer reset before this endpoint
-    /// accepted them (their request was never dispatched) that may be
-    /// counted at a time. When the peer keeps opening and resetting streams
-    /// faster than they are consumed, the connection is closed with a GOAWAY
+    /// produced a final response for them (their request was never
+    /// dispatched, or was dispatched but cancelled before the handler
+    /// responded) that may be counted at a time. When the peer keeps
+    /// opening and resetting streams faster than they are responded to,
+    /// the connection is closed with a GOAWAY
     /// of type `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2). `None` disables
     /// the limit. Defaults to `Some(20)`.
     #[inline]

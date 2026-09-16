@@ -105,6 +105,12 @@ pub(crate) struct StreamEntry {
     pub(crate) pending_end_stream: bool,
     /// The request HEADERS were parsed and the task spawned.
     pub(crate) request_started: bool,
+    /// The stream task produced a final response (HEADERS, DATA, or
+    /// trailers). Interim (1xx) messages do not set this. Used for
+    /// rapid-reset accounting (CVE-2023-44487): a peer reset before any
+    /// final response counts toward the reset budget even when the
+    /// request was already dispatched.
+    pub(crate) response_started: bool,
     /// The peer sent END_STREAM on this stream (request side done).
     pub(crate) remote_ended: bool,
     /// We sent END_STREAM on this stream (response side done).
@@ -155,6 +161,7 @@ impl StreamEntry {
             field_block: Vec::new(),
             pending_end_stream: false,
             request_started: false,
+            response_started: false,
             remote_ended: false,
             local_ended: false,
             content_length: None,

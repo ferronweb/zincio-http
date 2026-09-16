@@ -469,13 +469,18 @@ where
             stream_id,
             format!("reset by peer with code {error_code:#x} ({reason_name})"),
         );
-        if !entry.request_started {
-            // The peer reset a stream whose request we never accepted:
-            // bound how many such streams a peer may churn through
-            // (RFC 9113 Section 10.5.2).
+        if !entry.response_started {
+            // The peer reset a stream before we produced any final
+            // response for it. This covers both streams whose request
+            // was never dispatched and dispatched streams cancelled
+            // before the handler responded (CVE-2023-44487 rapid
+            // reset): bound how many such streams a peer may churn
+            // through (RFC 9113 Section 10.5.2). Resets after a final
+            // response started (headers/data/trailers) are ordinary
+            // cancellations of in-flight work and do not count.
             if let Some(max) = self.opts.max_pending_accept_reset_streams {
                 if self.pending_accept_resets >= max {
-                    self.goaway(Reason::EnhanceYourCalm, b"too many resets before accept");
+                    self.goaway(Reason::EnhanceYourCalm, b"too many resets before response");
                     return;
                 }
             }
@@ -1000,6 +1005,7 @@ where
                             return;
                         }
                         entry.local_ended = end_stream;
+                        entry.response_started = true;
                     }
                 }
                 self.encode_field_block(stream_id, end_stream, parts.status, &parts.headers);
@@ -1023,6 +1029,7 @@ where
                 // consumer with INTERNAL_ERROR broke large (>=10MB)
                 // static files behind hyper clients, whose WINDOW_UPDATEs
                 // legitimately lag the file chunks.
+                entry.response_started = true;
                 entry.pending_data.push_back((data, end_stream));
                 self.pump_stream_data(stream_id);
             }
@@ -1035,6 +1042,7 @@ where
                     return;
                 }
                 entry.local_ended = true;
+                entry.response_started = true;
                 self.frame_buffer.clear();
                 let mut headers: SmallVec<[HpackHeader; 8]> =
                     SmallVec::with_capacity(trailers.len());

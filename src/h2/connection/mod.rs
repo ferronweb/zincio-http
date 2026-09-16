@@ -73,9 +73,12 @@ pub struct ConnectionOptions {
     /// `None` disables the limit; when it is exceeded the connection
     /// closes with GOAWAY `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
     pub max_local_error_reset_streams: Option<usize>,
-    /// Maximum number of streams the peer reset before we accepted them.
-    /// `None` disables the limit; when it is exceeded the connection
-    /// closes with GOAWAY `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
+    /// Maximum number of streams the peer reset before we produced a
+    /// final response for them (CVE-2023-44487 rapid reset). This covers
+    /// both streams reset before dispatch and dispatched streams
+    /// cancelled before the handler responded. `None` disables the
+    /// limit; when it is exceeded the connection closes with GOAWAY
+    /// `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
     pub max_pending_accept_reset_streams: Option<usize>,
     /// Maximum number of frames that may compose a single, not-yet-finalized
     /// header field block (HEADERS/CONTINUATION). Beyond this a stream is
@@ -176,8 +179,9 @@ pub struct Connection<Io> {
     /// RST_STREAM frames this endpoint has sent in response to the
     /// peer's protocol errors (bounded by `opts.max_local_error_reset_streams`).
     local_error_resets: usize,
-    /// Streams the peer reset before this endpoint accepted them
-    /// (bounded by `opts.max_pending_accept_reset_streams`).
+    /// Streams the peer reset before this endpoint produced a final
+    /// response for them (bounded by
+    /// `opts.max_pending_accept_reset_streams`).
     pending_accept_resets: usize,
     /// Wakes the drive loop when a stream task fills its outbound
     /// channel; the loop drains channels between reads.

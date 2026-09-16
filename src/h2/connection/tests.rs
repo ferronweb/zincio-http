@@ -448,6 +448,118 @@ fn count_resets(decoded: &[Frame]) -> usize {
         .count()
 }
 
+/// A minimal valid GET field block (dispatches instead of resetting).
+#[inline]
+fn valid_get_block() -> Vec<u8> {
+    let mut encoder = Encoder::new(4096);
+    let mut block = Vec::new();
+    encoder.encode(
+        &[
+            HpackHeader::new(":method", "GET"),
+            HpackHeader::new(":scheme", "http"),
+            HpackHeader::new(":path", "/"),
+            HpackHeader::new(":authority", "x"),
+        ],
+        &mut block,
+    );
+    block
+}
+
+/// Injects a dispatched-but-unresponded stream (the rapid-reset state:
+/// request accepted and task spawned, no final response yet).
+#[inline]
+fn inject_dispatched_stream(conn: &mut Connection<tokio::io::DuplexStream>, id: u32) {
+    inject_pending_stream(conn, id);
+    if let Some(entry) = conn.streams.get_mut(&id) {
+        entry.request_started = true;
+        // response_started stays false: the handler has not responded.
+    }
+}
+
+/// Injects a stream whose final response already started.
+#[inline]
+fn inject_responded_stream(conn: &mut Connection<tokio::io::DuplexStream>, id: u32) {
+    inject_pending_stream(conn, id);
+    if let Some(entry) = conn.streams.get_mut(&id) {
+        entry.request_started = true;
+        entry.response_started = true;
+    }
+}
+
+#[test]
+fn rapid_reset_after_dispatch_hits_budget() {
+    // CVE-2023-44487: a valid HEADERS (dispatched inline) followed by an
+    // immediate RST_STREAM must count toward the reset budget even though
+    // `request_started` is already true. With a budget of 2, the third
+    // HEADERS+RST round must close the connection with ENHANCE_YOUR_CALM.
+    let block = valid_get_block();
+    let mut script = client_script(|_, _| {});
+    {
+        let writer = FrameWriter::new(DEFAULT_MAX_FRAME_SIZE);
+        for id in [1u32, 3, 5] {
+            writer.write_headers(&mut script, id, true, true, None, &block);
+            writer.write_reset(&mut script, id, Reason::Cancel.code());
+        }
+    }
+    let reply = run_connection_with(
+        CLIENT_PREFACE,
+        &script,
+        Some(Duration::from_secs(5)),
+        ConnectionOptions {
+            max_pending_accept_reset_streams: Some(2),
+            ..Default::default()
+        },
+    );
+    let decoded = decode_frames(&reply);
+    assert!(
+        decoded.iter().any(|f| matches!(
+            f,
+            Frame::GoAway { error_code, .. } if *error_code == Reason::EnhanceYourCalm.code()
+        )),
+        "expected ENHANCE_YOUR_CALM GOAWAY for rapid reset, got {decoded:?}"
+    );
+}
+
+#[test]
+fn dispatched_unresponded_reset_hits_budget_unit() {
+    // Unit-level: dispatched streams with no final response count, even
+    // though `request_started` is true.
+    let (_client, server) = tokio::io::duplex(1 << 16);
+    let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+    conn.opts.max_pending_accept_reset_streams = Some(2);
+    for id in [1u32, 3, 5] {
+        inject_dispatched_stream(&mut conn, id);
+        conn.handle_reset_frame(id, Reason::Cancel.code());
+    }
+    let decoded = decode_frames(&conn.out);
+    assert!(
+        decoded.iter().any(|f| matches!(
+            f,
+            Frame::GoAway { error_code, .. } if *error_code == Reason::EnhanceYourCalm.code()
+        )),
+        "expected ENHANCE_YOUR_CALM GOAWAY, got {decoded:?}"
+    );
+}
+
+#[test]
+fn reset_after_response_started_does_not_hit_budget() {
+    // Resets after a final response started are ordinary cancellations
+    // of in-flight work and must not consume the rapid-reset budget.
+    let (_client, server) = tokio::io::duplex(1 << 16);
+    let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+    conn.opts.max_pending_accept_reset_streams = Some(2);
+    for id in [1u32, 3, 5, 7, 9] {
+        inject_responded_stream(&mut conn, id);
+        conn.handle_reset_frame(id, Reason::Cancel.code());
+    }
+    let decoded = decode_frames(&conn.out);
+    assert!(
+        decoded.iter().all(|f| !matches!(f, Frame::GoAway { .. })),
+        "no GOAWAY expected for post-response resets, got {decoded:?}"
+    );
+    assert_eq!(conn.pending_accept_resets, 0);
+}
+
 #[test]
 fn continuation_flood_is_reset_without_closing_connection() {
     // A peer that opens a header field block (HEADERS without END_HEADERS)

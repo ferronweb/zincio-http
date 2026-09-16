@@ -1,5 +1,11 @@
 # `zincio-http` change log
 
+## `zincio-http` UNRELEASED
+
+**Not yet released**
+
+- Further hardened the HTTP/2 implementation against rapid-reset attacks.
+
 ## `zincio-http` 0.4.9
 
 **Released in September 16, 2026**

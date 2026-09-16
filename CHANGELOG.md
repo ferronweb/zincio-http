@@ -5,6 +5,7 @@
 **Not yet released**
 
 - Further hardened the HTTP/2 implementation against rapid-reset attacks.
+- Hardened HTTP/3 SETTINGS frame parsing.
 
 ## `zincio-http` 0.4.9
 

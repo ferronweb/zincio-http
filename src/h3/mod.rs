@@ -22,7 +22,10 @@ pub mod transport;
 mod upgrade;
 
 pub use error::{H3Error, TransportError};
-pub use frame::{Frame, FrameDecoder, FrameError, Settings};
+pub use frame::{
+    Frame, FrameDecoder, FrameError, Settings, MAX_FRAME_PAYLOAD, MAX_SETTINGS_ENTRIES,
+    MAX_SETTINGS_PAYLOAD,
+};
 pub use options::*;
 
 use std::{

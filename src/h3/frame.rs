@@ -34,9 +34,39 @@
 use std::collections::VecDeque;
 
 use bytes::{BufMut, Bytes, BytesMut};
+use rustc_hash::FxHashMap;
 
 /// The largest value a QUIC variable-length integer can carry.
 pub const MAX_VARINT: u64 = (1 << 62) - 1;
+
+/// Maximum number of setting identifiers accepted in one SETTINGS frame
+/// (RFC 9114 Section 7.2.4).
+///
+/// Fewer than ten identifiers are defined; the implementation sends five.
+/// A frame carrying more than this is abusive (CVE-class algorithmic
+/// complexity: previously each entry paid a linear duplicate scan, giving
+/// O(n^2) work in the entry count) and is rejected with `H3_SETTINGS_ERROR`.
+pub const MAX_SETTINGS_ENTRIES: usize = 32;
+
+/// Maximum SETTINGS frame payload in bytes.
+///
+/// With [`MAX_SETTINGS_ENTRIES`] entries of at most 16 bytes each (two
+/// 8-byte varints) no legitimate payload exceeds 512 bytes; this leaves
+/// 8x headroom while preventing an attacker from forcing the decoder to
+/// buffer megabytes before parsing. Oversized payloads are rejected with
+/// `H3_SETTINGS_ERROR` as soon as the length is declared, without waiting
+/// for (or buffering) the full payload.
+pub const MAX_SETTINGS_PAYLOAD: u64 = 4096;
+
+/// Maximum payload of any single HTTP/3 frame in bytes.
+///
+/// QUIC varint lengths reach 2^62-1, but buffering an unbounded payload
+/// before parsing is a memory-exhaustion vector. This ceiling (parity with
+/// HTTP/2's `MAX_FRAME_SIZE_LIMIT`) bounds per-frame buffering; larger
+/// declared lengths are rejected with `H3_FRAME_ERROR` immediately.
+/// Legitimate traffic (control frames are tiny; request bodies stream as
+/// sequences of smaller DATA frames) is unaffected.
+pub const MAX_FRAME_PAYLOAD: u64 = 16_777_215;
 
 /// `DATA` frame type (RFC 9114 Section 7.2.1).
 pub const FRAME_DATA: u64 = 0x0;
@@ -87,10 +117,26 @@ pub type Setting = (u64, u64);
 /// Settings are kept in wire order. Reserved (grease) identifiers are
 /// dropped on decode and may be added for encoding; unknown identifiers
 /// are preserved and ignored by the driver.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Duplicate detection is O(1) per entry via an index map (first value
+/// wins, matching the previous linear-scan semantics), so parsing is O(n)
+/// overall rather than O(n^2).
+#[derive(Debug, Clone, Default)]
 pub struct Settings {
     entries: Vec<Setting>,
+    /// Index of first-seen value per identifier (insertion order is kept
+    /// in `entries`, which may hold wire duplicates for re-encoding).
+    lookup: FxHashMap<u64, u64>,
 }
+
+impl PartialEq for Settings {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl Eq for Settings {}
 
 impl Settings {
     /// An empty SETTINGS payload.
@@ -103,20 +149,32 @@ impl Settings {
     #[inline]
     pub fn insert(&mut self, id: u64, value: u64) {
         self.entries.push((id, value));
+        self.lookup.entry(id).or_insert(value);
     }
 
     /// The value of the first parameter with `id`, if any.
     #[inline]
     pub fn get(&self, id: u64) -> Option<u64> {
-        self.entries
-            .iter()
-            .find_map(|(i, v)| (*i == id).then_some(*v))
+        self.lookup.get(&id).copied()
     }
 
     /// The parameters in wire order.
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = Setting> + '_ {
         self.entries.iter().copied()
+    }
+
+    /// Number of parameters held (wire order, including any duplicates
+    /// added via [`Settings::insert`]).
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the payload holds no parameters.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -314,6 +372,17 @@ impl FrameDecoder {
             let Some((len, len_len)) = self.parse_varint_at(type_len)? else {
                 return Ok(None);
             };
+            // Bound per-frame buffering before waiting for (or allocating)
+            // the payload: oversized SETTINGS are a settings violation,
+            // anything else absurdly large is a frame error. Checking the
+            // declared length first means a multi-megabyte abusive frame
+            // is rejected from its ~10-byte header without buffering.
+            if ty == FRAME_SETTINGS && len > MAX_SETTINGS_PAYLOAD {
+                return Err(FrameError::Settings);
+            }
+            if len > MAX_FRAME_PAYLOAD {
+                return Err(FrameError::Frame);
+            }
             let header_len = type_len + len_len;
             let Some(total) = header_len.checked_add(len as usize) else {
                 return Err(FrameError::Frame);
@@ -479,8 +548,16 @@ fn is_reserved_setting(id: u64) -> bool {
 
 #[inline]
 fn parse_settings(payload: &[u8]) -> Result<Settings, FrameError> {
+    if payload.len() as u64 > MAX_SETTINGS_PAYLOAD {
+        return Err(FrameError::Settings);
+    }
     let mut settings = Settings::new();
     let mut rest = payload;
+    // Bound the entry count so a many-entry frame is rejected after
+    // bounded work. Duplicate detection below is O(1) per entry via the
+    // settings index (previously a linear scan per entry, i.e. O(n^2)
+    // in the entry count), so the overall parse is O(n).
+    let mut count: usize = 0;
     while !rest.is_empty() {
         let Some((id, id_len)) = parse_varint(rest)? else {
             return Err(FrameError::Frame);
@@ -490,6 +567,10 @@ fn parse_settings(payload: &[u8]) -> Result<Settings, FrameError> {
             return Err(FrameError::Frame);
         };
         rest = &rest[value_len..];
+        count += 1;
+        if count > MAX_SETTINGS_ENTRIES {
+            return Err(FrameError::Settings);
+        }
         if is_reserved_setting(id) {
             return Err(FrameError::Settings);
         }
@@ -698,13 +779,14 @@ mod tests {
             vec![Frame::Data(Bytes::from_static(b"hello"))]
         );
 
-        // A frame declaring the maximum varint length stays incomplete
-        // without erroring or allocating.
+        // A frame declaring an absurd length (far beyond
+        // MAX_FRAME_PAYLOAD) is rejected from its header without
+        // buffering or allocating the payload.
         let mut decoder = FrameDecoder::new();
         decoder.extend(Bytes::from_static(&[
             0x01, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
         ]));
-        assert_eq!(decoder.next_frame().unwrap(), None);
+        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Frame);
         assert_eq!(decoder.buffered(), 10);
     }
 
@@ -805,6 +887,97 @@ mod tests {
         // Odd-length payload (a lone identifier) -> H3_FRAME_ERROR.
         let mut decoder = FrameDecoder::new();
         decoder.extend(Bytes::from_static(&[0x04, 0x01, 0x06]));
+        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Frame);
+    }
+
+    #[inline]
+    fn distinct_test_ids(n: usize) -> Vec<u64> {
+        // Distinct, non-reserved, non-grease identifiers for entry-cap
+        // tests (grease `0x21 + 0x1f*k` and reserved `0x02-0x05` are
+        // skipped so every entry is inserted).
+        let mut ids = Vec::new();
+        let mut id = 0x1000u64;
+        while ids.len() < n {
+            if !(0x02..=0x05).contains(&id) && !(id >= 0x21 && (id - 0x21) % 0x1f == 0) {
+                ids.push(id);
+            }
+            id += 1;
+        }
+        ids
+    }
+
+    #[test]
+    fn settings_lookup_returns_first_value() {
+        // `get` keeps the previous linear-scan semantics (first value
+        // wins) while running in O(1).
+        let mut s = Settings::new();
+        s.insert(0x06, 1);
+        s.insert(0x06, 2);
+        assert_eq!(s.get(0x06), Some(1));
+        assert_eq!(s.len(), 2);
+        assert!(!s.is_empty());
+        assert!(Settings::new().is_empty());
+    }
+
+    #[test]
+    fn settings_rejects_too_many_entries() {
+        // More than MAX_SETTINGS_ENTRIES distinct identifiers ->
+        // H3_SETTINGS_ERROR after bounded work. The wire payload stays
+        // under MAX_SETTINGS_PAYLOAD here, so this isolates the entry
+        // cap (not the length cap).
+        let mut s = Settings::new();
+        for id in distinct_test_ids(MAX_SETTINGS_ENTRIES + 1) {
+            s.insert(id, 0);
+        }
+        let mut wire = BytesMut::new();
+        Frame::Settings(s).encode(&mut wire);
+        assert!((wire.len() as u64) < MAX_SETTINGS_PAYLOAD + 16);
+        let mut decoder = FrameDecoder::new();
+        decoder.extend(wire.freeze());
+        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Settings);
+    }
+
+    #[test]
+    fn settings_at_cap_parses() {
+        // Exactly MAX_SETTINGS_ENTRIES distinct identifiers is accepted.
+        let mut s = Settings::new();
+        for id in distinct_test_ids(MAX_SETTINGS_ENTRIES) {
+            s.insert(id, 0);
+        }
+        let mut wire = BytesMut::new();
+        Frame::Settings(s).encode(&mut wire);
+        let mut decoder = FrameDecoder::new();
+        decoder.extend(wire.freeze());
+        match decoder.next_frame().unwrap().unwrap() {
+            Frame::Settings(got) => assert_eq!(got.len(), MAX_SETTINGS_ENTRIES),
+            other => panic!("expected Settings, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settings_rejects_oversized_payload_without_buffering() {
+        // A SETTINGS length declaration beyond MAX_SETTINGS_PAYLOAD is
+        // rejected from the header alone (H3_SETTINGS_ERROR), without
+        // waiting for or buffering the payload.
+        let mut wire = BytesMut::new();
+        write_varint(FRAME_SETTINGS, &mut wire);
+        write_varint(MAX_SETTINGS_PAYLOAD + 1, &mut wire);
+        let header_len = wire.len();
+        let mut decoder = FrameDecoder::new();
+        decoder.extend(wire.freeze());
+        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Settings);
+        assert_eq!(decoder.buffered(), header_len);
+    }
+
+    #[test]
+    fn oversized_frames_rejected_from_header() {
+        // Any frame declaring beyond MAX_FRAME_PAYLOAD is rejected
+        // immediately (H3_FRAME_ERROR) instead of buffering unboundedly.
+        let mut wire = BytesMut::new();
+        write_varint(FRAME_DATA, &mut wire);
+        write_varint(MAX_FRAME_PAYLOAD + 1, &mut wire);
+        let mut decoder = FrameDecoder::new();
+        decoder.extend(wire.freeze());
         assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Frame);
     }
 

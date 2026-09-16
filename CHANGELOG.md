@@ -1,5 +1,12 @@
 # `zincio-http` change log
 
+## `zincio-http` UNRELEASED
+
+**Not yet released**
+
+- Added `stream_error_callback` to `Http2` and `Http3`: a callback invoked with a `std::io::Error` whenever a stream fails (for example a malformed request, a flow-control violation, or a reset).
+- HTTP/2 and HTTP/3 connection-level protocol violations are now returned as `Err` with a descriptive message instead of closing silently (HTTP/1.x already returned clear connection errors).
+
 ## `zincio-http` 0.4.8
 
 **Released in September 16, 2026**

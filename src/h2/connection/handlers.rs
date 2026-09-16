@@ -110,6 +110,13 @@ where
         }
         self.highest_stream_id = stream_id;
         if self.streams.len() as u32 >= self.opts.max_concurrent_streams {
+            self.report_stream_error(
+                stream_id,
+                format!(
+                    "RefusedStream ({:#x}): max concurrent streams exceeded",
+                    Reason::RefusedStream.code()
+                ),
+            );
             self.writer
                 .write_reset(&mut self.out, stream_id, Reason::RefusedStream.code());
             return;
@@ -389,6 +396,13 @@ where
             StreamDataState::Closed => {
                 // DATA on a closed stream: stream error
                 // (RFC 9113 Section 5.1).
+                self.report_stream_error(
+                    stream_id,
+                    format!(
+                        "StreamClosed ({:#x}): DATA on closed stream",
+                        Reason::StreamClosed.code()
+                    ),
+                );
                 self.writer
                     .write_reset(&mut self.out, stream_id, Reason::StreamClosed.code());
             }
@@ -448,6 +462,13 @@ where
             }
             return;
         };
+        let reason_name = Reason::from_code(error_code)
+            .map(|reason| format!("{reason:?}"))
+            .unwrap_or_else(|| "Unknown".to_string());
+        self.report_stream_error(
+            stream_id,
+            format!("reset by peer with code {error_code:#x} ({reason_name})"),
+        );
         if !entry.request_started {
             // The peer reset a stream whose request we never accepted:
             // bound how many such streams a peer may churn through
@@ -512,8 +533,19 @@ where
     }
 
     /// Queues a GOAWAY frame; the connection closes after it flushes.
+    ///
+    /// Records a clear connection-level [`std::io::Error`] (the first one
+    /// wins) so [`Connection::handle`](super::Connection::handle) returns
+    /// `Err` instead of silently closing.
     #[inline]
     pub(crate) fn goaway(&mut self, reason: Reason, debug: &[u8]) {
+        if self.connection_error.is_none() {
+            let detail = String::from_utf8_lossy(debug);
+            self.connection_error = Some(std::io::Error::other(format!(
+                "HTTP/2 connection error: {reason:?} ({:#x}): {detail}",
+                reason.code()
+            )));
+        }
         self.closing = true;
         self.writer
             .write_goaway(&mut self.out, self.highest_stream_id, reason.code(), debug);
@@ -560,6 +592,7 @@ where
     /// ends on its next poll.
     #[inline]
     pub(crate) fn stream_error(&mut self, stream_id: u32, reason: Reason) {
+        self.report_stream_error(stream_id, format!("{reason:?} ({:#x})", reason.code()));
         // Bound the RST_STREAM frames we send for the peer's protocol
         // errors (RFC 9113 Section 10.5.2): a peer that keeps making
         // errors past the limit costs the connection, not the stream.
@@ -1016,6 +1049,13 @@ where
                     .write_field_block(&mut self.out, stream_id, true, &self.frame_buffer);
             }
             StreamMsg::Reset { error_code, .. } => {
+                let reason_name = Reason::from_code(error_code)
+                    .map(|reason| format!("{reason:?}"))
+                    .unwrap_or_else(|| "Unknown".to_string());
+                self.report_stream_error(
+                    stream_id,
+                    format!("reset with code {error_code:#x} ({reason_name})"),
+                );
                 self.writer
                     .write_reset(&mut self.out, stream_id, error_code);
                 self.mark_closed(stream_id);

@@ -50,7 +50,7 @@ use crate::{
         date::DateCache,
         stream::{RequestStream, SharedCodecs, StreamError},
     },
-    EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded,
+    EarlyHints, HttpProtocol, Incoming, StreamErrorCallback, Upgrade, Upgraded,
 };
 
 /// Application error codes from RFC 9114 Section 8.1 used by the driver.
@@ -222,6 +222,41 @@ fn h3_stream_error_to_io(error: stream::StreamError) -> std::io::Error {
     std::io::Error::other(error)
 }
 
+/// Human-readable name for an HTTP/3 application error code, if known.
+#[inline]
+fn h3_code_name(code: u64) -> String {
+    if let Some(known) = crate::h3::error::H3Error::from_code(code) {
+        format!("{known:?}")
+    } else {
+        // QPACK errors live in a separate family (RFC 9204 Section 6).
+        match code {
+            0x0200 => "QpackDecompressionFailed".to_string(),
+            0x0201 => "QpackEncoderStream".to_string(),
+            0x0202 => "QpackDecoderStream".to_string(),
+            _ => "Unknown".to_string(),
+        }
+    }
+}
+
+/// Builds a clear connection-level [`std::io::Error`] for an HTTP/3
+/// connection torn down with the given application error code.
+#[inline]
+fn h3_connection_error(code: u64, detail: Option<&str>) -> std::io::Error {
+    let name = h3_code_name(code);
+    match detail {
+        Some(detail) => std::io::Error::other(format!(
+            "HTTP/3 connection error: {name} ({code:#x}): {detail}"
+        )),
+        None => std::io::Error::other(format!("HTTP/3 connection error: {name} ({code:#x})")),
+    }
+}
+
+/// Builds a stream-level [`std::io::Error`] for an HTTP/3 stream failure.
+#[inline]
+fn h3_stream_error(stream_id: u64, error: &impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(format!("HTTP/3 stream {stream_id} error: {error}"))
+}
+
 #[inline]
 fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
     for header in &HTTP3_INVALID_HEADERS {
@@ -330,6 +365,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     send_continue_response: bool,
     send_date_header: bool,
     conn_state: Arc<parking_lot::Mutex<ConnResetState>>,
+    stream_error_callback: Option<StreamErrorCallback>,
 ) where
     F: Fn(Request<Incoming>) -> Fut,
     Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
@@ -337,6 +373,16 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     ResE: std::error::Error,
     ResBE: std::error::Error,
 {
+    #[inline]
+    fn report(
+        callback: &Option<StreamErrorCallback>,
+        stream_id: u64,
+        error: impl std::fmt::Display,
+    ) {
+        if let Some(callback) = callback.as_ref() {
+            callback(h3_stream_error(stream_id, &error));
+        }
+    }
     // Read the request.
     let request_headers = {
         let mut guard = stream.lock().await;
@@ -352,6 +398,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
             // stream that never reached the handler. Bound how many of
             // these a peer may churn through (RFC 9114 Section 10.5).
             if err.is_stream_scoped() {
+                report(&stream_error_callback, stream_id, &err);
                 let mut state = conn_state.lock();
                 if let Some(code) = state.note_pending_accept_reset() {
                     state.close_code = Some(code);
@@ -362,6 +409,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
             // `H3_MESSAGE_ERROR` rather than the whole connection (RFC
             // 9114 Section 4.1.2), bounded by the local-reset budget.
             if matches!(err, StreamError::Message) {
+                report(&stream_error_callback, stream_id, &err);
                 let mut guard = stream.lock().await;
                 let code = err.h3_code();
                 let _ = std::future::poll_fn(|cx| guard.poll_reset(cx, code)).await;
@@ -482,10 +530,8 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
             }
             // 100 Continue
             None => {
-                if send_interim_response(&stream, StatusCode::CONTINUE)
-                    .await
-                    .is_err()
-                {
+                if let Err(error) = send_interim_response(&stream, StatusCode::CONTINUE).await {
+                    report(&stream_error_callback, stream_id, &error);
                     return;
                 }
             }
@@ -494,6 +540,13 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
 
     let Ok(mut response) = response_result else {
         // Return early if the request handler returns an error
+        if let Err(error) = response_result {
+            report(
+                &stream_error_callback,
+                stream_id,
+                format_args!("request handler error: {error}"),
+            );
+        }
         return;
     };
 
@@ -527,15 +580,15 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
         && !continue_sent
         && !response.status().is_client_error()
         && !response.status().is_server_error()
-        && send_interim_response(&stream, StatusCode::CONTINUE)
-            .await
-            .is_err()
     {
-        return;
+        if let Err(error) = send_interim_response(&stream, StatusCode::CONTINUE).await {
+            report(&stream_error_callback, stream_id, &error);
+            return;
+        }
     }
 
     let (response_parts, mut response_body) = response.into_parts();
-    if send_response(
+    if let Err(error) = send_response(
         &stream,
         &shared,
         stream_id,
@@ -543,8 +596,8 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
         &response_parts.headers,
     )
     .await
-    .is_err()
     {
+        report(&stream_error_callback, stream_id, &error);
         return;
     }
 
@@ -568,11 +621,17 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                                     // Don't waste bandwidth using empty frames...
                                     continue;
                                 }
-                                if send_data(&stream, data).await.is_err() {
+                                if let Err(error) = send_data(&stream, data).await {
+                                    report(&stream_error_callback, stream_id, &error);
                                     return;
                                 }
                             }
                             Err(_) => {
+                                report(
+                                    &stream_error_callback,
+                                    stream_id,
+                                    "response body data frame error",
+                                );
                                 return;
                             }
                         }
@@ -580,25 +639,38 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                         match frame.into_trailers() {
                             Ok(mut trailers) => {
                                 remove_invalid_http3_headers(&mut trailers);
-                                if send_trailers(&stream, &trailers).await.is_err() {
+                                if let Err(error) = send_trailers(&stream, &trailers).await {
+                                    report(&stream_error_callback, stream_id, &error);
                                     return;
                                 }
                                 break;
                             }
                             Err(_) => {
+                                report(
+                                    &stream_error_callback,
+                                    stream_id,
+                                    "response body trailers frame error",
+                                );
                                 return;
                             }
                         }
                     }
                 }
-                Err(_) => {
+                Err(error) => {
+                    report(
+                        &stream_error_callback,
+                        stream_id,
+                        format_args!("response body error: {error}"),
+                    );
                     return;
                 }
             }
         }
     }
 
-    let _ = send_finish(&stream).await;
+    if let Err(error) = send_finish(&stream).await {
+        report(&stream_error_callback, stream_id, &error);
+    }
 }
 
 /// An HTTP/3 connection handler.
@@ -628,6 +700,7 @@ pub struct Http3<Io> {
     date_header_value_cached: DateCache,
     options: Http3Options,
     cancel_token: Option<CancellationToken>,
+    stream_error_callback: Option<StreamErrorCallback>,
 }
 
 impl<Io> Http3<Io>
@@ -653,6 +726,7 @@ where
             date_header_value_cached: DateCache::default(),
             options,
             cancel_token: None,
+            stream_error_callback: None,
         }
     }
 
@@ -664,6 +738,22 @@ where
     #[inline]
     pub fn graceful_shutdown_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
+        self
+    }
+
+    /// Attaches a stream error callback invoked with a [`std::io::Error`]
+    /// whenever an HTTP/3 stream fails (for example a malformed request,
+    /// a reset by the peer, or a response write failure).
+    ///
+    /// Connection-level failures continue to surface as the `Err` return
+    /// value of [`HttpProtocol::handle`]; this callback only observes
+    /// per-stream failures so they can be logged.
+    #[inline]
+    pub fn stream_error_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(std::io::Error) + Send + Sync + 'static,
+    {
+        self.stream_error_callback = Some(std::sync::Arc::new(callback));
         self
     }
 }
@@ -692,6 +782,7 @@ where
                 date_header_value_cached,
                 options,
                 cancel_token,
+                stream_error_callback,
             } = self;
             let mut conn = io_to_handshake
                 .take()
@@ -757,6 +848,9 @@ where
             // and must close with this H3 code (rather than the graceful
             // GOAWAY + H3_NO_ERROR path).
             let mut closing_with: Option<u64> = None;
+            // Human-readable detail for `closing_with`, when the error that
+            // triggered the close carried more context than its code.
+            let mut closing_detail: Option<String> = None;
             let mut outcome: Option<Result<(), std::io::Error>> = None;
             let mut last_request_id = 0u64;
 
@@ -844,6 +938,7 @@ where
                                 control_dead = true;
                             } else {
                                 closing_with = Some(err.h3_code());
+                                closing_detail = Some(err.to_string());
                                 shutdown = true;
                                 control_dead = true;
                             }
@@ -873,6 +968,7 @@ where
                                     break;
                                 }
                                 closing_with = Some(err.h3_code());
+                                closing_detail = Some(err.to_string());
                                 shutdown = true;
                                 control_dead = true;
                                 break;
@@ -890,7 +986,13 @@ where
                         ready!(conn
                             .poll_shutdown(cx, code)
                             .map_err(h3_transport_error_to_io))?;
-                        return Poll::Ready(outcome.take().unwrap_or(Ok(())));
+                        if let Some(outcome) = outcome.take() {
+                            return Poll::Ready(outcome);
+                        }
+                        return Poll::Ready(Err(h3_connection_error(
+                            code,
+                            closing_detail.as_deref(),
+                        )));
                     }
                     if controls.goaway_sent().is_none() {
                         controls.send_goaway(last_request_id);
@@ -949,6 +1051,7 @@ where
                                 let date_cache = date_cache.clone();
                                 let shared = shared.clone();
                                 let conn_state_for_task = conn_state.clone();
+                                let stream_error_callback = stream_error_callback.clone();
                                 zincio::spawn(async move {
                                     let _end = end_tx;
                                     handle_request(
@@ -960,6 +1063,7 @@ where
                                         send_continue_response,
                                         send_date_header,
                                         conn_state_for_task,
+                                        stream_error_callback,
                                     )
                                     .await;
                                 });
@@ -998,5 +1102,42 @@ where
             })
             .await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_error_message_includes_stream_id() {
+        let error = h3_stream_error(9, &"reset by peer with code 0xc");
+        let text = error.to_string();
+        assert!(text.contains("stream 9"), "got: {text}");
+        assert!(text.contains("reset by peer"), "got: {text}");
+    }
+
+    #[test]
+    fn connection_error_names_known_codes() {
+        let error = h3_connection_error(H3Error::GeneralProtocol.code(), None);
+        let text = error.to_string();
+        assert!(text.contains("HTTP/3 connection error"), "got: {text}");
+        assert!(text.contains("GeneralProtocol"), "got: {text}");
+        assert!(text.contains("0x101"), "got: {text}");
+    }
+
+    #[test]
+    fn connection_error_carries_detail() {
+        let error = h3_connection_error(H3Error::FrameUnexpected.code(), Some("bad frame"));
+        let text = error.to_string();
+        assert!(text.contains("FrameUnexpected"), "got: {text}");
+        assert!(text.contains("bad frame"), "got: {text}");
+    }
+
+    #[test]
+    fn unknown_code_is_reported_as_unknown() {
+        assert_eq!(h3_code_name(0x0101), "GeneralProtocol");
+        assert_eq!(h3_code_name(0x0200), "QpackDecompressionFailed");
+        assert_eq!(h3_code_name(0xdead_beef), "Unknown");
     }
 }

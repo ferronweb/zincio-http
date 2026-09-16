@@ -87,6 +87,20 @@ pub use upgrade::*;
 
 use http::{Request, Response};
 use http_body::Body;
+use std::sync::Arc;
+
+/// Callback invoked when an HTTP/2 or HTTP/3 stream fails.
+///
+/// The argument is always a [`std::io::Error`] describing the stream
+/// failure (including the stream id where known), so handlers do not
+/// need to depend on protocol-specific error types.
+pub type StreamErrorCallback = Arc<dyn Fn(std::io::Error) + Send + Sync + 'static>;
+
+/// Builds a stream-error [`std::io::Error`] with a human-readable message.
+#[inline]
+pub fn stream_error_io_error(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(message.into())
+}
 
 /// A trait representing an HTTP protocol (for example, HTTP/1.1, HTTP/2, HTTP/3).
 ///

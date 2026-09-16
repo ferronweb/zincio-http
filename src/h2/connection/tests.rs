@@ -494,6 +494,166 @@ fn continuation_flood_is_reset_without_closing_connection() {
 }
 
 #[test]
+fn stream_error_callback_reports_malformed_request() {
+    // A request that decodes but fails validation is a stream error
+    // (RST_STREAM PROTOCOL_ERROR): the callback must observe it with the
+    // stream id, while the connection itself stays open.
+    let errors: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let errors_clone = errors.clone();
+    let block = malformed_request_block();
+    let script: Vec<u8> = [
+        CLIENT_PREFACE,
+        &client_script(|w, out| {
+            w.write_headers(out, 1, false, true, None, &block);
+        }),
+    ]
+    .concat();
+    let reply = zincio::RuntimeBuilder::new()
+        .enable_timer(true)
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let (client_end, server_end) = tokio::io::duplex(1 << 16);
+            let server = zincio::spawn(async move {
+                let conn = Connection::new(server_end, Some(Duration::from_secs(5)))
+                    .with_stream_error_callback(std::sync::Arc::new(
+                        move |error: std::io::Error| {
+                            errors_clone.lock().unwrap().push(error.to_string());
+                        },
+                    ));
+                let _ = conn
+                    .handle(
+                        Arc::new(|_| {
+                            std::future::pending::<Result<Response<Incoming>, std::io::Error>>()
+                        }),
+                        ConnectionOptions::default(),
+                    )
+                    .await;
+            });
+
+            let mut client = client_end;
+            tokio::io::AsyncWriteExt::write_all(&mut client, &script)
+                .await
+                .expect("write script");
+            zincio::time::sleep(Duration::from_millis(50)).await;
+
+            let mut reply = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let read = zincio::time::timeout(
+                    Duration::from_millis(100),
+                    tokio::io::AsyncReadExt::read(&mut client, &mut buf),
+                )
+                .await;
+                match read {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(n)) => reply.extend_from_slice(&buf[..n]),
+                }
+            }
+            drop(client);
+            zincio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("server did not finish");
+            reply
+        });
+    let decoded = decode_frames(&reply);
+    assert!(
+        decoded
+            .iter()
+            .any(|f| matches!(f, Frame::Reset { stream_id: 1, .. })),
+        "expected RST_STREAM for stream 1, got {decoded:?}"
+    );
+    let errors = errors.lock().unwrap();
+    assert_eq!(errors.len(), 1, "expected one stream error, got {errors:?}");
+    assert!(
+        errors[0].contains("stream 1"),
+        "error must name the stream, got: {}",
+        errors[0]
+    );
+}
+
+#[test]
+fn connection_error_is_returned_as_err() {
+    // A SETTINGS frame with ACK and a payload is a connection error
+    // (FRAME_SIZE_ERROR): handle() must return Err with a clear message
+    // instead of silently closing with Ok.
+    let bad = [
+        0x00, 0x00, 0x06, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let mut frames = client_script(|_, _| {});
+    frames.extend_from_slice(&bad);
+    let script: Vec<u8> = [CLIENT_PREFACE, &frames].concat();
+    let result = zincio::RuntimeBuilder::new()
+        .enable_timer(true)
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let (client_end, server_end) = tokio::io::duplex(1 << 16);
+            let server = zincio::spawn(async move {
+                let conn = Connection::new(server_end, Some(Duration::from_secs(5)));
+                conn.handle(
+                    Arc::new(|_| {
+                        std::future::pending::<Result<Response<Incoming>, std::io::Error>>()
+                    }),
+                    ConnectionOptions::default(),
+                )
+                .await
+            });
+            let mut client = client_end;
+            tokio::io::AsyncWriteExt::write_all(&mut client, &script)
+                .await
+                .expect("write script");
+            zincio::time::sleep(Duration::from_millis(50)).await;
+            drop(client);
+            zincio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("server did not finish")
+        });
+    let error = result.expect_err("expected a connection error, got Ok");
+    assert!(
+        error.to_string().contains("HTTP/2 connection error"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn invalid_preface_is_returned_as_err() {
+    let script: Vec<u8> = b"INVALID CONNECTION PREFACE!!".to_vec();
+    let result = zincio::RuntimeBuilder::new()
+        .enable_timer(true)
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let (client_end, server_end) = tokio::io::duplex(1 << 16);
+            let server = zincio::spawn(async move {
+                let conn = Connection::new(server_end, Some(Duration::from_secs(5)));
+                conn.handle(
+                    Arc::new(|_| {
+                        std::future::pending::<Result<Response<Incoming>, std::io::Error>>()
+                    }),
+                    ConnectionOptions::default(),
+                )
+                .await
+            });
+            let mut client = client_end;
+            tokio::io::AsyncWriteExt::write_all(&mut client, &script)
+                .await
+                .expect("write script");
+            zincio::time::sleep(Duration::from_millis(50)).await;
+            drop(client);
+            zincio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("server did not finish")
+        });
+    let error = result.expect_err("expected a connection error, got Ok");
+    assert!(
+        error.to_string().contains("invalid connection preface"),
+        "got: {error}"
+    );
+}
+
+#[test]
 fn complete_field_block_within_limit_is_not_reset() {
     // A normally-packed, bounded header block that spans several
     // CONTINUATION frames but stays under the limit must not be reset.

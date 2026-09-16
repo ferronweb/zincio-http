@@ -217,6 +217,10 @@ pub struct Connection<Io> {
     date_cache: Arc<DateCache>,
     /// Buffer for HTTP/2 frame encoding reuse
     frame_buffer: Vec<u8>,
+    /// Invoked with a [`std::io::Error`] whenever a stream fails.
+    stream_error_callback: Option<crate::StreamErrorCallback>,
+    /// First connection-level protocol error seen (set by [`Connection::goaway`]).
+    connection_error: Option<std::io::Error>,
 }
 
 impl<Io> Connection<Io>
@@ -261,6 +265,8 @@ where
             shutdown: None,
             date_cache: Arc::new(DateCache::new()),
             frame_buffer: Vec::new(),
+            stream_error_callback: None,
+            connection_error: None,
         }
     }
 
@@ -272,6 +278,26 @@ where
     pub fn with_shutdown(mut self, token: CancellationToken) -> Self {
         self.shutdown = Some(token);
         self
+    }
+
+    /// Attaches a stream error callback invoked with a [`std::io::Error`]
+    /// whenever a stream fails.
+    #[inline]
+    pub fn with_stream_error_callback(mut self, callback: crate::StreamErrorCallback) -> Self {
+        self.stream_error_callback = Some(callback);
+        self
+    }
+
+    /// Reports a stream failure to the configured callback, if any.
+    #[inline]
+    pub(crate) fn report_stream_error(&self, stream_id: u32, message: impl Into<String>) {
+        if let Some(callback) = self.stream_error_callback.as_ref() {
+            let error = crate::stream_error_io_error(format!(
+                "HTTP/2 stream {stream_id} error: {}",
+                message.into()
+            ));
+            callback(error);
+        }
     }
 
     /// Drives a connection that never serves requests: the preface
@@ -327,7 +353,10 @@ where
                 // (RFC 9113 Section 3.5), then close.
                 self.goaway(Reason::ProtocolError, b"invalid connection preface");
                 self.flush().await?;
-                return Ok(());
+                return Err(self
+                    .connection_error
+                    .take()
+                    .unwrap_or_else(|| std::io::Error::other("invalid connection preface")));
             }
             Some(true) => {}
         }
@@ -456,6 +485,9 @@ where
             self.finish_graceful_shutdown();
         }
         self.flush().await?;
+        if let Some(error) = self.connection_error.take() {
+            return Err(error);
+        }
         Ok(())
     }
 

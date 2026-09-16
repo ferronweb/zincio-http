@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use crate::h2::connection::{Connection, ConnectionOptions};
 use crate::h2::date::DateCache;
 use crate::h2::options::Http2Options;
-use crate::{HttpProtocol, Incoming};
+use crate::{HttpProtocol, Incoming, StreamErrorCallback};
 
 pub mod codec;
 pub mod connection;
@@ -86,6 +86,7 @@ pub struct Http2<Io> {
     io_to_handshake: Option<Io>,
     options: Http2Options,
     cancel_token: Option<CancellationToken>,
+    stream_error_callback: Option<StreamErrorCallback>,
 }
 
 impl<Io> Http2<Io>
@@ -109,6 +110,7 @@ where
             io_to_handshake: Some(io),
             options,
             cancel_token: None,
+            stream_error_callback: None,
         }
     }
 
@@ -119,6 +121,22 @@ where
     #[inline]
     pub fn graceful_shutdown_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
+        self
+    }
+
+    /// Attaches a stream error callback invoked with a [`std::io::Error`]
+    /// whenever an HTTP/2 stream fails (for example a malformed request,
+    /// a flow-control violation, or a reset).
+    ///
+    /// Connection-level failures continue to surface as the `Err` return
+    /// value of [`HttpProtocol::handle`]; this callback only observes
+    /// per-stream failures so they can be logged.
+    #[inline]
+    pub fn stream_error_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(std::io::Error) + Send + Sync + 'static,
+    {
+        self.stream_error_callback = Some(std::sync::Arc::new(callback));
         self
     }
 }
@@ -168,6 +186,11 @@ where
         );
         let connection = if let Some(token) = self.cancel_token {
             connection.with_shutdown(token)
+        } else {
+            connection
+        };
+        let connection = if let Some(callback) = self.stream_error_callback {
+            connection.with_stream_error_callback(callback)
         } else {
             connection
         };

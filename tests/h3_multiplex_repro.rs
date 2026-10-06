@@ -261,8 +261,11 @@ async fn run_scenario_inner(tiny: bool, cancel_large: bool) {
             Ok::<_, String>(())
         }
         .await;
+        // This is the whole point of the probe, so a failure must fail the
+        // test rather than merely print: a connection that cannot serve a
+        // fresh request after a large transfer is the regression under test.
         if let Err(e) = post_probe {
-            println!("POST-CANCEL probe FAILED (connection torn down?): {e}");
+            panic!("post-transfer probe failed, connection unusable: {e}");
         }
 
         let ok_small = by_wave.len();

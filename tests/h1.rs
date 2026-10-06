@@ -598,11 +598,14 @@ async fn test_http_pipelining() {
 
             let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
             let server_task = tokio::task::spawn_local(server.handle(|req| async {
+                // Echo the request path so the two pipelined responses are
+                // distinguishable, which is what lets us assert FIFO order.
+                let path = req.uri().path().to_owned();
                 let _ = req.into_body().collect().await;
                 Ok::<_, http::Error>(
                     http::Response::builder()
                         .status(200)
-                        .body(Full::new(bytes::Bytes::from_static(b"Hello")))
+                        .body(Full::new(bytes::Bytes::from(path.into_bytes())))
                         .unwrap(),
                 )
             }));
@@ -610,8 +613,8 @@ async fn test_http_pipelining() {
             let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
 
             let requests = [
-                "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-                "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n",
             ];
             let _ = client_writer.write_all(requests.join("").as_bytes()).await;
             let _ = client_writer.shutdown().await;
@@ -620,8 +623,31 @@ async fn test_http_pipelining() {
             let mut response_buf = Vec::new();
             client_reader.read_to_end(&mut response_buf).await.unwrap();
 
-            // Expect 200 OK for both responses
-            assert!(response_buf.starts_with(b"HTTP/1.1 200 OK\r\n"));
+            // Pipelining requires one response per request, in request order.
+            // Asserting only that the buffer *starts with* a 200 would still
+            // pass if the second response were never sent at all.
+            let status_line = b"HTTP/1.1 200 OK";
+            let statuses = response_buf
+                .windows(status_line.len())
+                .filter(|w| *w == status_line)
+                .count();
+            assert_eq!(
+                statuses, 2,
+                "expected one response per pipelined request, got {statuses}: {response_buf:?}"
+            );
+
+            let first = response_buf
+                .windows(b"/first".len())
+                .position(|w| w == b"/first")
+                .expect("first response body missing");
+            let second = response_buf
+                .windows(b"/second".len())
+                .position(|w| w == b"/second")
+                .expect("second response body missing");
+            assert!(
+                first < second,
+                "pipelined responses out of FIFO order: {response_buf:?}"
+            );
 
             let _ = server_task.await;
         })

@@ -111,6 +111,42 @@ curl -s --http2-prior-knowledge http://127.0.0.1:18081/large
 curl -sk --http3-only https://localhost:18443/large
 ```
 
+## Why no web browsers
+
+Web browsers are deliberately absent from the matrix, even though they are the
+most common HTTP clients in existence. Every major browser ships a bespoke
+HTTP stack that cannot be driven as a script client:
+
+| Browser | HTTP/2 | HTTP/3 / QUIC | TLS |
+| --- | --- | --- | --- |
+| Chrome / Edge | Custom (`Http2Session`, BoringSSL) | Custom (Cronet QUIC) | BoringSSL |
+| Firefox | Custom (`nsHttp`, Necko) | neqo (Rust) | NSS |
+| Safari | Custom (CFNetwork) | Custom (Network.framework) | SecureTransport |
+
+Concretely, a browser cannot do what this matrix needs:
+
+- **No raw frame control.** A driver must send a specific oversized header
+  block, reset a stream mid-response, or observe a 103 separately from the
+  final response. Browsers expose navigation-level APIs (fetch, XHR), not
+  frames. Headless Chrome via CDP can capture what happened
+  (`Network.responseReceivedExtraInfo` shows 103s), but it cannot *cause* a
+  mid-stream reset on demand.
+- **No trust-anchor flexibility in automation.** The scenario server uses a
+  fresh self-signed certificate per run. Browsers can be told to ignore it
+  (`--ignore-certificate-errors`), but that flag also disables the very TLS
+  alert paths conformance cares about.
+- **Shared fate with the OS resolver and proxy.** Containers give each client
+  a reproducible network namespace; browsers inherit the host's.
+
+What covers the browser-shaped traffic instead: curl (the same nghttp2 that
+ships in many embeddings), OkHttp (the Android stack, which *is* a browser
+engine's sibling on that platform), and the `h2spec` strict suite, which
+encodes the RFC requirements browsers depend on. If browser coverage is ever
+needed, the honest route is headless Chrome driven over CDP against the
+scenario server with `--host-resolver-rules` pinning the test origin --
+a separate harness, not an extension of this one, because assertions would be
+about page loads rather than the observation lines defined here.
+
 ## CI
 
 `.github/workflows/interop.yml` runs the whole matrix on every pull request.

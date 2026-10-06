@@ -120,8 +120,37 @@ pub static CURL_HTTP3: ClientSpec = ClientSpec {
     build_context: Some("docker/curl"),
 };
 
+/// Go net/http over HTTP/1.1 and h2c, built from a checked-in program.
+///
+/// x/net/http2/hpack is the third independent HPACK encoder in the matrix,
+/// and goroutines make it the second client (with aioquic) that drives real
+/// concurrent streams, so HTTP/2 concurrency is no longer covered by a single
+/// implementation.
+pub static GO: ClientSpec = ClientSpec {
+    id: "go",
+    name: "Go net/http",
+    protocols: &[Protocol::Http1, Protocol::Http2],
+    capabilities: &[
+        Capability::Upload,
+        Capability::Concurrency,
+        Capability::BigHeader,
+        Capability::LongUri,
+        Capability::ManyHeaders,
+    ],
+    image: Some(ImageSpec::Build {
+        tag: "zincio-http-interop-go",
+        context: "go",
+        target: "driver",
+    }),
+    entrypoint: Some(Entrypoint {
+        program: "/usr/local/bin/interop-driver",
+        args: &[],
+    }),
+    build_context: Some("docker/go"),
+};
+
 /// Every client currently in the matrix.
-pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3];
+pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO];
 
 /// The clients to run, honouring `ZINCIO_INTEROP_CLIENTS`.
 ///

@@ -72,22 +72,20 @@ Registered clients, and what each can actually observe:
 | Client | Protocols | Scenarios |
 | --- | --- | --- |
 | `curl` (nghttp2) | HTTP/1.1, HTTP/2 | 18 scenario runs |
+| `curl` (ngtcp2, from source) | HTTP/3 | 9 scenario runs |
+| `aioquic` (Python QPACK) | HTTP/3 | 41 scenario runs, incl. 32-way concurrency |
+| `Go` (x/net HPACK) | HTTP/1.1, HTTP/2 | 78 scenario runs, incl. 32-way concurrency |
 
 Not yet covered:
 
-- **HTTP/3 through a container.** The HTTP/3 *server* is verified against a real
-  HTTP/3 client (curl with ngtcp2, exact digest match -- see below), but no
-  containerised HTTP/3 client is registered yet. Building one requires
-  compiling curl from source, and its CMake configure step is unresolved; the
-  full recipe is left in `docker/curl/Dockerfile` so the next attempt does not
-  have to rediscover it. `KNOWN_UNCOVERED_PROTOCOLS` in `src/clients.rs` names
-  this gap explicitly, and a *new* uncovered protocol still fails the suite.
-- **Concurrent streams.** Needs a client that can drive several streams at once;
-  curl makes one request per invocation. The scenario exists, and `h2spec`
-  covers the protocol-level behaviour meanwhile.
-- **Response trailers and 103 Early Hints as observed by a client.** curl cannot
-  surface either, so those scenarios currently run only in
-  `tests/h2_smoke.rs`.
+- **Concurrent streams over HTTP/1.1.** Pipelining aside, HTTP/1.1 has no
+  multiplexing, so the concurrency scenario only runs over HTTP/2 and HTTP/3
+  (via Go and aioquic respectively).
+- **103 Early Hints and 100 Continue as observed by a containerised client.**
+  aioquic tears down the connection on any 1xx-then-final exchange (its HEADERS
+  state machine has no informational state) and curl cannot surface 1xx at
+  all, so those two scenarios run only in `tests/h2_smoke.rs` and the in-repo
+  fixture tests. Response trailers *are* covered, via aioquic.
 
 ## Running
 

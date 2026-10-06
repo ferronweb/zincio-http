@@ -940,13 +940,17 @@ async fn fixture_client_dynamic_table_reload_and_reconnect() {
             dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
             b"dyn-ok /page"
         );
-        drop(fixture);
+        // Shut down gracefully while the peer is still present, and drop the
+        // client only afterwards: dropping first tears down QUIC abruptly, and
+        // if the server observes the dead peer before the cancel it reports
+        // ClosedCriticalStream instead of Ok.
         cancel.cancel();
         let result = server_result
             .recv_timeout(Duration::from_secs(10))
             .expect("server 1 finished");
         assert!(result.is_ok(), "server 1 handle: {result:?}");
         server_thread.join().expect("join server 1");
+        drop(fixture);
 
         // Connection 2: the browser closed and reopened; the fresh
         // connection must serve the dynamic-table response on its first
@@ -964,13 +968,14 @@ async fn fixture_client_dynamic_table_reload_and_reconnect() {
             dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
             b"dyn-ok /page"
         );
-        drop(fixture);
+        // Same teardown ordering as above: graceful shutdown first, drop after.
         cancel.cancel();
         let result = server_result
             .recv_timeout(Duration::from_secs(10))
             .expect("server 2 finished");
         assert!(result.is_ok(), "server 2 handle: {result:?}");
         server_thread.join().expect("join server 2");
+        drop(fixture);
     })
     .await
     .expect("fixture_client_dynamic_table_reload_and_reconnect timed out");
@@ -1227,13 +1232,15 @@ async fn fixture_client_dynamic_table_eviction_pressure() {
             );
             assert_eq!(data, format!("dyn-ok {path}").into_bytes());
         }
-        drop(fixture);
+        // Same teardown ordering: graceful shutdown while the peer is present,
+        // drop the client only after the server has exited.
         cancel.cancel();
         let result = server_result
             .recv_timeout(Duration::from_secs(10))
             .expect("server finished");
         assert!(result.is_ok(), "server handle: {result:?}");
         server_thread.join().expect("join server");
+        drop(fixture);
     })
     .await
     .expect("fixture_client_dynamic_table_eviction_fix timed out");

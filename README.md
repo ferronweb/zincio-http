@@ -146,14 +146,20 @@ cleanly.
 
 ## Benchmarks
 
-The crate ships Criterion benchmarks for the hot paths:
+The crate ships Criterion benchmarks for the HPACK/QPACK codecs:
 
 ```sh
-# QPACK codec (table sizes 0/512/4096, Huffman on/off)
+# HPACK encode + decode
+cargo bench --features h2 --bench h2_hpack
+
+# HPACK encode with large headers
+cargo bench --features h2 --bench h2_hpack_large
+
+# QPACK round-trip (table sizes 0/512/4096, Huffman on/off)
 cargo bench --features h3 --bench h3_qpack
 
-# Native HTTP/3 server throughput + latency over a quinn loopback
-cargo bench --features h3-quinn --bench h3_server
+# QPACK encode with large headers
+cargo bench --features h3 --bench h3_qpack_large
 ```
 
 ## Crate API at a glance

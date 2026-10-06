@@ -14,17 +14,15 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          override-file: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --all-features
 
-      #- name: Run Tests
-      #  run: cargo test --release
+      - name: Run tests
+        # Never publish without the suite passing. This previously ran with
+        # tests commented out entirely.
+        run: cargo test --release --all-features
 
       - name: Publish
         run: cargo publish --token ${{ secrets.CRATES_TOKEN }}

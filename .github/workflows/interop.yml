@@ -29,16 +29,46 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: interop
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Build client images
-        # Built here so the images are warm before the tests start, and so a
-        # broken Dockerfile fails with a clear message instead of surfacing as
-        # a matrix full of container-start failures.
-        run: |
-          docker build --tag zincio-http-interop-curl:latest \
-            --target driver \
-            --file interop/docker/curl/Dockerfile \
-            interop
+      # Built here so the images are warm before the tests start, and so a
+      # broken Dockerfile fails with a clear message instead of surfacing as a
+      # matrix full of container-start failures. Tags must match the ones in
+      # interop/src/clients.rs, whose `docker build` then hits a warm cache.
+      # The GitHub Actions cache keeps the expensive HTTP/3 source build from
+      # running on every pull request.
+      - name: Build curl image (HTTP/1.1 + HTTP/2)
+        uses: docker/build-push-action@v6
+        with:
+          context: interop
+          file: interop/docker/curl/Dockerfile
+          target: driver
+          tags: zincio-http-interop-curl:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build curl-http3 image
+        uses: docker/build-push-action@v6
+        with:
+          context: interop
+          file: interop/docker/curl/Dockerfile
+          target: http3
+          tags: zincio-http-interop-curl-http3:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build aioquic image (HTTP/3)
+        uses: docker/build-push-action@v6
+        with:
+          context: interop
+          file: interop/docker/aioquic/Dockerfile
+          target: driver
+          tags: zincio-http-interop-aioquic:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Run interop matrix
         working-directory: interop

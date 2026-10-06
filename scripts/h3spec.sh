@@ -12,12 +12,19 @@
 # fragmentation) that are not fixable without forking quinn. They are easy to
 # find and re-enable as the implementation (or the TLS stack) is hardened.
 #
-#   - 49 test cases total
-#   - 47 passing
-#   - 2 skipped (1 TLS-layer gap, 1 quinn/h3spec FINAL_SIZE race)
+# Verified 2026-10-06 against h3spec 0.1.13: 49 cases total, 46 run green,
+# 2 skipped below, 1 self-skipped by h3spec (0-RTT, which needs a session the
+# harness does not establish). Without skips the TLS missing_extension case
+# fails deterministically (quinn limitation) while the QPACK Insert Count
+# case flakes with packetization timing.
 #
 # Env overrides: H3SPEC_HOST, H3SPEC_PORT, H3SPEC_BIN (path to a prebuilt
 # server binary), H3SPEC_TIMEOUT (per-case timeout in ms, default 2000).
+#
+# Prerequisites: python3 (UDP readiness probe), and the h3spec binary at
+# ./h3spec/h3spec -- download it from
+# https://github.com/kazu-yamamoto/h3spec/releases (H3SPEC_VERSION in
+# .github/workflows/h3spec.yml pins the version CI uses).
 
 set -u
 set -o pipefail
@@ -57,13 +64,8 @@ KNOWN_FAILING=(
 
 SKIP_ARGS=()
 for desc in "${KNOWN_FAILING[@]}"; do
-    SKIP_ARGS+=(-s "$desc")
+  SKIP_ARGS+=(-s "$desc")
 done
-
-if [ ! -x "$BIN" ]; then
-    echo "==> building h3spec_server example"
-    cargo build --example h3spec_server --features h3,h3-quinn
-fi
 
 echo "==> starting h3spec_server on ${HOST}:${PORT}"
 "$BIN" &
@@ -100,6 +102,12 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 echo "==> running h3spec -n (${#KNOWN_FAILING[@]} known-failing cases skipped)"
+if [ ! -x ./h3spec/h3spec ]; then
+  echo "error: h3spec binary not found at ./h3spec/h3spec" >&2
+  echo "download it from https://github.com/kazu-yamamoto/h3spec/releases" >&2
+  echo "(H3SPEC_VERSION in .github/workflows/h3spec.yml pins the CI version)" >&2
+  exit 1
+fi
 ./h3spec/h3spec "$HOST" "$PORT" -n -t "$TIMEOUT" "${SKIP_ARGS[@]}"
 status=$?
 echo "==> h3spec exited with code ${status}"

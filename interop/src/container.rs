@@ -85,12 +85,13 @@ impl ClientContainer {
         self.spec
     }
 
-    /// Runs one scenario inside the container and parses its observation.
+    /// Runs one scenario inside the container and parses its observations.
     ///
-    /// The driver script is expected to print a single observation line; a
-    /// missing or unparsable line is itself a failure, because it means the
-    /// driver broke rather than that the server misbehaved.
-    pub async fn run(&self, args: &ScenarioArgs) -> Result<Observation, String> {
+    /// A driver prints one observation line per request it performed, so a
+    /// concurrency scenario yields one line per stream. Every line is parsed
+    /// and returned; a missing or unparsable line is itself a failure, because
+    /// it means the driver broke rather than that the server misbehaved.
+    pub async fn run(&self, args: &ScenarioArgs) -> Result<Vec<Observation>, String> {
         let entrypoint = self
             .spec
             .entrypoint
@@ -124,28 +125,34 @@ impl ClientContainer {
             .map_err(|err| format!("{}: reading stderr failed: {err}", self.spec.name))?;
 
         let stdout = String::from_utf8_lossy(&stdout).to_string();
-        let line = stdout
+        let lines: Vec<&str> = stdout
             .lines()
-            .find(|line| line.starts_with("status="))
-            .ok_or_else(|| {
-                format!(
-                    "{}: {} over {} printed no observation line\nstdout: {}\nstderr: {}",
-                    self.spec.name,
-                    args.scenario,
-                    args.protocol.name(),
-                    stdout.trim(),
-                    String::from_utf8_lossy(&stderr).trim()
-                )
-            })?;
-
-        Observation::parse(line).map_err(|err| {
-            format!(
-                "{}: {} over {}: {err}",
+            .filter(|line| line.starts_with("status="))
+            .collect();
+        if lines.is_empty() {
+            return Err(format!(
+                "{}: {} over {} printed no observation line\nstdout: {}\nstderr: {}",
                 self.spec.name,
                 args.scenario,
-                args.protocol.name()
-            )
-        })
+                args.protocol.name(),
+                stdout.trim(),
+                String::from_utf8_lossy(&stderr).trim()
+            ));
+        }
+
+        lines
+            .iter()
+            .map(|line| {
+                Observation::parse(line).map_err(|err| {
+                    format!(
+                        "{}: {} over {}: {err}",
+                        self.spec.name,
+                        args.scenario,
+                        args.protocol.name()
+                    )
+                })
+            })
+            .collect()
     }
 }
 
@@ -251,7 +258,7 @@ mod tests {
         // A typo in a build context would only surface as a container start
         // failure deep into the matrix, so it is checked directly.
         assert!(docker_dir().exists(), "{} missing", docker_dir().display());
-        for context in ["curl"] {
+        for context in ["curl", "aioquic"] {
             assert!(
                 docker_dir().join(context).join("Dockerfile").exists(),
                 "missing Dockerfile for {context}"

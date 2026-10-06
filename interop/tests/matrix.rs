@@ -142,9 +142,22 @@ async fn single_request_matrix() {
                 };
 
                 match container.run(&args).await {
-                    Ok(observation) => {
+                    Ok(observations) => {
+                        // A generic scenario is a single request, so exactly one
+                        // observation line is expected. Anything else means the
+                        // driver misbehaved, not that the server did.
+                        if observations.len() != 1 {
+                            failures.push(format!(
+                                "[{} over {}] {} printed {} observation lines, expected 1",
+                                client_spec.id,
+                                protocol.name(),
+                                scenario.name,
+                                observations.len()
+                            ));
+                            continue;
+                        }
                         ran += 1;
-                        if let Err(err) = observation.verify(scenario.name, expect) {
+                        if let Err(err) = observations[0].verify(scenario.name, expect) {
                             failures.push(format!(
                                 "[{} over {}] {err} ({})",
                                 client_spec.id,
@@ -215,17 +228,37 @@ async fn bespoke_matrix() {
                     step: scenario.steps[0],
                 };
                 match container.run(&args).await {
-                    Ok(observation) => {
-                        ran += 1;
-                        let expect = match scenario.name {
-                            "abort_midstream" => Expect::Exact {
-                                len: scenario::SMALL_LEN,
-                            },
-                            "idle_reuse" => Expect::Exact {
-                                len: scenario::SMALL_LEN,
-                            },
-                            "concurrency" => Expect::Exact {
-                                len: scenario::SMALL_LEN,
+                    Ok(observations) => {
+                        // How many observation lines the driver must have
+                        // produced, and what each one has to satisfy.
+                        let (expected_lines, expect) = match scenario.name {
+                            "abort_midstream" => (
+                                1,
+                                Expect::Exact {
+                                    len: scenario::SMALL_LEN,
+                                },
+                            ),
+                            "idle_reuse" => (
+                                1,
+                                Expect::Exact {
+                                    len: scenario::SMALL_LEN,
+                                },
+                            ),
+                            "concurrency" => match scenario.steps[0] {
+                                Step::Concurrent { count, .. } => (
+                                    count,
+                                    Expect::Exact {
+                                        len: scenario::SMALL_LEN,
+                                    },
+                                ),
+                                _ => {
+                                    failures.push(format!(
+                                        "[{} over {}] concurrency is not a Concurrent step",
+                                        client_spec.id,
+                                        protocol.name()
+                                    ));
+                                    continue;
+                                }
                             },
                             other => {
                                 failures.push(format!(
@@ -236,13 +269,27 @@ async fn bespoke_matrix() {
                                 continue;
                             }
                         };
-                        if let Err(err) = observation.verify(scenario.name, expect) {
+                        if observations.len() != expected_lines {
                             failures.push(format!(
-                                "[{} over {}] {err} ({})",
+                                "[{} over {}] {} printed {} observation line(s), expected {expected_lines}",
                                 client_spec.id,
                                 protocol.name(),
-                                scenario.rationale
+                                scenario.name,
+                                observations.len()
                             ));
+                            continue;
+                        }
+                        for (index, observation) in observations.iter().enumerate() {
+                            ran += 1;
+                            if let Err(err) = observation.verify(scenario.name, expect) {
+                                failures.push(format!(
+                                    "[{} over {}] {} stream {index}: {err} ({})",
+                                    client_spec.id,
+                                    protocol.name(),
+                                    scenario.name,
+                                    scenario.rationale
+                                ));
+                            }
                         }
                     }
                     Err(err) => failures.push(format!(

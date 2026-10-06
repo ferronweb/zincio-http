@@ -31,6 +31,11 @@ zincio-http = { path = "..", features = ["h1", "h2", "h3", "h3-quinn"] }
 h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
+# hyper is a reference client, not a dependency of the library itself. It
+# found the 0.4.8 large-body flow-control bug, so it replays that regression
+# directly with its own independent flow-control strategy.
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [[bin]]
 name = "interop-server"

@@ -99,7 +99,9 @@ fn parse_hex(hex: &str) -> Vec<u8> {
         "wire hex string has even length"
     );
     hex.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let hi = hexval(pair[0]);
             let lo = hexval(pair[1]);

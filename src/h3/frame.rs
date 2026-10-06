@@ -898,7 +898,7 @@ mod tests {
         let mut ids = Vec::new();
         let mut id = 0x1000u64;
         while ids.len() < n {
-            if !(0x02..=0x05).contains(&id) && !(id >= 0x21 && (id - 0x21) % 0x1f == 0) {
+            if !(0x02..=0x05).contains(&id) && !(id >= 0x21 && (id - 0x21).is_multiple_of(0x1f)) {
                 ids.push(id);
             }
             id += 1;

@@ -15,6 +15,9 @@ use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
 use zincio_http::qpack::{Decoder, Encoder};
 
+/// A named header-set producer used to drive the round-trip benchmarks.
+type HeaderCase = (&'static str, &'static dyn Fn() -> Vec<(Bytes, Bytes)>);
+
 fn request_headers() -> Vec<(Bytes, Bytes)> {
     vec![
         (Bytes::from_static(b":method"), Bytes::from_static(b"GET")),
@@ -82,7 +85,7 @@ fn encode(headers: &[(Bytes, Bytes)], capacity: u64, huffman: bool) -> (Bytes, B
 }
 
 fn bench_roundtrip(c: &mut Criterion) {
-    let cases: &[(&str, &dyn Fn() -> Vec<(Bytes, Bytes)>)] = &[
+    let cases: &[HeaderCase] = &[
         ("request", &request_headers),
         ("response", &response_headers),
     ];

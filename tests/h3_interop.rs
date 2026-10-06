@@ -1352,6 +1352,17 @@ async fn fixture_client_local_error_reset_budget_closes_with_excessive_load() {
         let result = server_result
             .recv_timeout(Duration::from_secs(10))
             .expect("server finished");
+        // The server deliberately force-closes the connection once the budget is
+        // exhausted, so `handle` returns the connection error instead of Ok
+        // (error reporting since 0.4.9). Assert it is specifically
+        // ExcessiveLoad: discarding the value would let any error -- or
+        // none at all -- pass unnoticed.
+        let err = result.expect_err("expected ExcessiveLoad connection error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ExcessiveLoad") && msg.contains("0x107"),
+            "unexpected server error: {msg}"
+        );
         server_thread.join().expect("join server");
     })
     .await
@@ -1399,6 +1410,14 @@ async fn fixture_client_pending_accept_reset_budget_closes_with_excessive_load()
         let result = server_result
             .recv_timeout(Duration::from_secs(10))
             .expect("server finished");
+        // Same reasoning as the local-error budget above: the forced close is
+        // expected to surface as an ExcessiveLoad connection error.
+        let err = result.expect_err("expected ExcessiveLoad connection error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ExcessiveLoad") && msg.contains("0x107"),
+            "unexpected server error: {msg}"
+        );
         server_thread.join().expect("join server");
     })
     .await

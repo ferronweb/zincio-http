@@ -78,8 +78,7 @@ where
             let have_to_read_buf = !just_started || self.read_buf.is_empty();
             just_started = false;
             if have_to_read_buf {
-                let Some(n) = self.fill_buf_or_wanted(send_continue_body).await?
-                else {
+                let Some(n) = self.fill_buf_or_wanted(send_continue_body).await? else {
                     continue;
                 };
                 if n == 0 {
@@ -134,8 +133,7 @@ where
                         *continue_sent = true;
                         self.write_100_continue(version).await?;
                     }
-                    let Some(n) = self.fill_buf_or_wanted(send_continue_body).await?
-                    else {
+                    let Some(n) = self.fill_buf_or_wanted(send_continue_body).await? else {
                         continue;
                     };
                     if n == 0 {
@@ -193,8 +191,7 @@ where
                     *continue_sent = true;
                     self.write_100_continue(version).await?;
                 }
-                let Some(n) = self.fill_buf_or_wanted(send_continue_body).await?
-                else {
+                let Some(n) = self.fill_buf_or_wanted(send_continue_body).await? else {
                     continue;
                 };
                 if n == 0 {

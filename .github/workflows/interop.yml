@@ -103,17 +103,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build Go image
-        uses: docker/build-push-action@v6
-        with:
-          context: interop
-          file: interop/docker/go/Dockerfile
-          target: driver
-          tags: zincio-http-interop-go:latest
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
       - name: Build python-h2 image
         uses: docker/build-push-action@v6
         with:

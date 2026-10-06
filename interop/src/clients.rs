@@ -149,8 +149,42 @@ pub static GO: ClientSpec = ClientSpec {
     build_context: Some("docker/go"),
 };
 
+/// hyper-h2 over HTTP/2: the popular Python HTTP/2 stack with raw frame control.
+///
+/// Unlike curl this client can observe 103 Early Hints and response trailers,
+/// which is what closes the container-coverage gap curl leaves on those two
+/// scenarios. Its HPACK encoder is the fourth independent one in the matrix.
+pub static PYTHON_H2: ClientSpec = ClientSpec {
+    id: "python-h2",
+    name: "Python hyper-h2",
+    protocols: &[Protocol::Http2],
+    capabilities: &[
+        Capability::Upload,
+        Capability::ResponseTrailers,
+        Capability::RequestTrailers,
+        Capability::Concurrency,
+        Capability::Abort,
+        Capability::ExpectContinue,
+        Capability::EarlyHints,
+        Capability::BigHeader,
+        Capability::LongUri,
+        Capability::ManyHeaders,
+        Capability::IdleReuse,
+    ],
+    image: Some(ImageSpec::Build {
+        tag: "zincio-http-interop-python-h2",
+        context: "python-h2",
+        target: "driver",
+    }),
+    entrypoint: Some(Entrypoint {
+        program: "/usr/local/bin/interop-driver",
+        args: &[],
+    }),
+    build_context: Some("docker/python-h2"),
+};
+
 /// Every client currently in the matrix.
-pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO];
+pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO, &PYTHON_H2];
 
 /// The clients to run, honouring `ZINCIO_INTEROP_CLIENTS`.
 ///

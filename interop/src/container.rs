@@ -258,7 +258,7 @@ mod tests {
         // A typo in a build context would only surface as a container start
         // failure deep into the matrix, so it is checked directly.
         assert!(docker_dir().exists(), "{} missing", docker_dir().display());
-        for context in ["curl", "aioquic", "go"] {
+        for context in ["curl", "aioquic", "go", "python-h2"] {
             assert!(
                 docker_dir().join(context).join("Dockerfile").exists(),
                 "missing Dockerfile for {context}"

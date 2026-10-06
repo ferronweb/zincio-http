@@ -18,6 +18,38 @@ use memchr::memmem;
 
 use crate::{h1::Http1, Incoming};
 
+/// Coordinates `100 Continue` between the request-body consumer and the
+/// socket reader.
+///
+/// The handler signals interest by polling the body; the socket reader sends
+/// `100 Continue` before blocking for body bytes. Both sides run as separate
+/// tasks, so the flag alone is not enough: if the reader is already parked in
+/// a socket read when the handler polls, nothing would wake it and a client
+/// that strictly waits for `100` before sending the body would deadlock
+/// (curl masks this with its 1s expect-timeout fallback; OkHttp does not).
+/// The `Notify` closes that race: setting interest always wakes the reader,
+/// and the reader always re-checks interest after waking.
+#[derive(Default)]
+pub(crate) struct ContinueSignal {
+    wanted: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ContinueSignal {
+    /// Records the handler's interest in the body and wakes the reader.
+    #[inline]
+    fn request(&self) {
+        self.wanted.store(true, Ordering::Relaxed);
+        self.notify.notify_one();
+    }
+
+    /// Whether the handler has asked for the body.
+    #[inline]
+    fn is_wanted(&self) -> bool {
+        self.wanted.load(Ordering::Relaxed)
+    }
+}
+
 impl<Io> Http1<Io>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
@@ -27,7 +59,7 @@ where
         &mut self,
         body_tx: kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
         content_length: u64,
-        send_continue_body: &Option<Arc<AtomicBool>>,
+        send_continue_body: &Option<Arc<ContinueSignal>>,
         continue_sent: &mut bool,
         version: Version,
     ) -> Result<(), std::io::Error> {
@@ -37,7 +69,7 @@ where
             if !*continue_sent
                 && send_continue_body
                     .as_ref()
-                    .is_some_and(|b| b.load(Ordering::Relaxed))
+                    .is_some_and(|signal| signal.is_wanted())
             {
                 *continue_sent = true;
                 self.write_100_continue(version).await?;
@@ -46,7 +78,10 @@ where
             let have_to_read_buf = !just_started || self.read_buf.is_empty();
             just_started = false;
             if have_to_read_buf {
-                let n = self.fill_buf().await?;
+                let Some(n) = self.fill_buf_or_wanted(send_continue_body).await?
+                else {
+                    continue;
+                };
                 if n == 0 {
                     break;
                 }
@@ -70,7 +105,7 @@ where
     pub(crate) async fn read_body_chunk(
         &mut self,
         would_have_trailers: bool,
-        send_continue_body: &Option<Arc<AtomicBool>>,
+        send_continue_body: &Option<Arc<ContinueSignal>>,
         continue_sent: &mut bool,
         version: Version,
     ) -> Result<bytes::Bytes, std::io::Error> {
@@ -94,12 +129,15 @@ where
                     if !*continue_sent
                         && send_continue_body
                             .as_ref()
-                            .is_some_and(|b| b.load(Ordering::Relaxed))
+                            .is_some_and(|signal| signal.is_wanted())
                     {
                         *continue_sent = true;
                         self.write_100_continue(version).await?;
                     }
-                    let n = self.fill_buf().await?;
+                    let Some(n) = self.fill_buf_or_wanted(send_continue_body).await?
+                    else {
+                        continue;
+                    };
                     if n == 0 {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
@@ -150,12 +188,15 @@ where
                 if !*continue_sent
                     && send_continue_body
                         .as_ref()
-                        .is_some_and(|b| b.load(Ordering::Relaxed))
+                        .is_some_and(|signal| signal.is_wanted())
                 {
                     *continue_sent = true;
                     self.write_100_continue(version).await?;
                 }
-                let n = self.fill_buf().await?;
+                let Some(n) = self.fill_buf_or_wanted(send_continue_body).await?
+                else {
+                    continue;
+                };
                 if n == 0 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
@@ -247,12 +288,37 @@ where
         ))
     }
 
+    /// Reads socket bytes, returning `Ok(None)` when the handler asked for
+    /// the body while waiting (the caller re-checks interest and loops).
+    /// `Ok(Some(n))` carries the `fill_buf` byte count, with 0 meaning EOF.
+    #[inline]
+    async fn fill_buf_or_wanted(
+        &mut self,
+        send_continue_body: &Option<Arc<ContinueSignal>>,
+    ) -> Result<Option<usize>, std::io::Error> {
+        match send_continue_body.as_ref() {
+            Some(signal) => {
+                // futures_util::select rather than tokio::select!: the latter
+                // needs tokio's `macros` feature, which this crate does not
+                // enable.
+                let notified = std::pin::pin!(signal.notify.notified());
+                let fill = std::pin::pin!(self.fill_buf());
+                match futures_util::future::select(notified, fill).await {
+                    futures_util::future::Either::Left((_, _)) => Ok(None),
+                    futures_util::future::Either::Right((res, _)) => res.map(Some),
+                }
+            }
+            // No Expect: 100-continue on this request; plain socket read.
+            None => self.fill_buf().await.map(Some),
+        }
+    }
+
     #[inline]
     pub(crate) async fn read_chunked_body_fn(
         &mut self,
         body_tx: kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
         would_have_trailers: bool,
-        send_continue_body: &Option<Arc<AtomicBool>>,
+        send_continue_body: &Option<Arc<ContinueSignal>>,
         continue_sent: &mut bool,
         version: Version,
     ) -> Result<(), std::io::Error> {
@@ -288,7 +354,7 @@ where
         Option<(
             Request<Incoming>,
             kanal::AsyncSender<Result<http_body::Frame<bytes::Bytes>, std::io::Error>>,
-            Option<Arc<AtomicBool>>,
+            Option<Arc<ContinueSignal>>,
         )>,
         std::io::Error,
     > {
@@ -323,7 +389,7 @@ where
                     h.name.eq_ignore_ascii_case("expect")
                         && h.value.eq_ignore_ascii_case(b"100-continue")
                 });
-            let send_continue_body = is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
+            let send_continue_body = is_100_continue.then(|| Arc::new(ContinueSignal::default()));
 
             let request_body = Http1Body {
                 inner: body_rx,
@@ -388,7 +454,7 @@ pub(crate) struct Http1Body {
             >,
         >,
     >,
-    send_continue_body: Option<Arc<AtomicBool>>,
+    send_continue_body: Option<Arc<ContinueSignal>>,
 }
 
 impl Body for Http1Body {
@@ -417,8 +483,8 @@ impl Body for Http1Body {
                         return Poll::Ready(None);
                     }
                     Poll::Pending => {
-                        if let Some(scb) = this.send_continue_body.as_ref() {
-                            scb.store(true, Ordering::Relaxed);
+                        if let Some(signal) = this.send_continue_body.as_ref() {
+                            signal.request();
                         }
                         return Poll::Pending;
                     }

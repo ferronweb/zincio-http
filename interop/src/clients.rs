@@ -133,6 +133,12 @@ pub static GO: ClientSpec = ClientSpec {
     capabilities: &[
         Capability::Upload,
         Capability::Concurrency,
+        // 103 is observed through httptrace.Got1xxResponse, which fires on
+        // both HTTP/1.1 and HTTP/2.
+        Capability::EarlyHints,
+        // The Expect header is sent explicitly; the final Echo verifies the
+        // exchange completed.
+        Capability::ExpectContinue,
         Capability::BigHeader,
         Capability::LongUri,
         Capability::ManyHeaders,

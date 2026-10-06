@@ -27,6 +27,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
+	"net/textproto"
 	"os"
 	"strconv"
 	"strings"
@@ -103,6 +105,20 @@ func doOnce(client *http.Client, method, url string, upload []byte, extra [][2]s
 		req.ContentLength = int64(len(upload))
 	}
 
+	// Observe informational responses. Go surfaces every 1xx through this
+	// hook on both HTTP/1.1 and HTTP/2, which is what lets this driver report
+	// 103 Early Hints -- something curl fundamentally cannot do.
+	var saw103 bool
+	trace := &httptrace.ClientTrace{
+		Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
+			if code == 103 {
+				saw103 = true
+			}
+			return nil
+		},
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+
 	resp, err := client.Do(req)
 	if err != nil {
 		emit(0, 0, "", false, false, "request_failed")
@@ -116,7 +132,7 @@ func doOnce(client *http.Client, method, url string, upload []byte, extra [][2]s
 		return
 	}
 	sum := sha256.Sum256(body)
-	emit(resp.StatusCode, len(body), hex.EncodeToString(sum[:]), false, false, "")
+	emit(resp.StatusCode, len(body), hex.EncodeToString(sum[:]), false, saw103, "")
 }
 
 func main() {
@@ -169,6 +185,8 @@ func main() {
 		extra = append(extra, [2]string{"x-big", string(bytes.Repeat([]byte("v"), 32*1024))})
 	case "long_uri":
 		url += "?" + string(pattern(8*1024))
+	case "expect_continue":
+		extra = append(extra, [2]string{"Expect", "100-continue"})
 	}
 
 	client, err := newClient(protocol, base)

@@ -189,8 +189,44 @@ pub static PYTHON_H2: ClientSpec = ClientSpec {
     build_context: Some("docker/python-h2"),
 };
 
+/// quic-go over HTTP/3: the Go QUIC stack behind Caddy and many CDNs.
+///
+/// Unlike aioquic it observes 103 Early Hints (its httptrace fires) and
+/// trailers, and its QPACK encoder accepts 8 KiB values, so it carries the
+/// full H3 matrix including the 1xx scenarios aioquic cannot run. Two
+/// independent H3 client stacks handling 103 correctly, against one that
+/// cannot, is itself evidence about where that limitation lives.
+pub static QUIC_GO: ClientSpec = ClientSpec {
+    id: "quic-go",
+    name: "quic-go (HTTP/3)",
+    protocols: &[Protocol::Http3],
+    capabilities: &[
+        Capability::Upload,
+        Capability::ResponseTrailers,
+        Capability::RequestTrailers,
+        Capability::Concurrency,
+        Capability::Abort,
+        Capability::ExpectContinue,
+        Capability::EarlyHints,
+        Capability::BigHeader,
+        Capability::LongUri,
+        Capability::ManyHeaders,
+        Capability::IdleReuse,
+    ],
+    image: Some(ImageSpec::Build {
+        tag: "zincio-http-interop-quic-go",
+        context: "quic-go",
+        target: "driver",
+    }),
+    entrypoint: Some(Entrypoint {
+        program: "/usr/local/bin/interop-driver",
+        args: &[],
+    }),
+    build_context: Some("docker/quic-go"),
+};
+
 /// Every client currently in the matrix.
-pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO, &PYTHON_H2];
+pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO, &PYTHON_H2, &QUIC_GO];
 
 /// The clients to run, honouring `ZINCIO_INTEROP_CLIENTS`.
 ///

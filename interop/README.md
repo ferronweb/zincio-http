@@ -65,6 +65,30 @@ couple of flags with no trust-anchor configuration.
 The matrix is the intersection, so an unimplemented capability becomes a
 reported skip rather than a spurious failure.
 
+## Coverage
+
+Registered clients, and what each can actually observe:
+
+| Client | Protocols | Scenarios |
+| --- | --- | --- |
+| `curl` (nghttp2) | HTTP/1.1, HTTP/2 | 18 scenario runs |
+
+Not yet covered:
+
+- **HTTP/3 through a container.** The HTTP/3 *server* is verified against a real
+  HTTP/3 client (curl with ngtcp2, exact digest match -- see below), but no
+  containerised HTTP/3 client is registered yet. Building one requires
+  compiling curl from source, and its CMake configure step is unresolved; the
+  full recipe is left in `docker/curl/Dockerfile` so the next attempt does not
+  have to rediscover it. `KNOWN_UNCOVERED_PROTOCOLS` in `src/clients.rs` names
+  this gap explicitly, and a *new* uncovered protocol still fails the suite.
+- **Concurrent streams.** Needs a client that can drive several streams at once;
+  curl makes one request per invocation. The scenario exists, and `h2spec`
+  covers the protocol-level behaviour meanwhile.
+- **Response trailers and 103 Early Hints as observed by a client.** curl cannot
+  surface either, so those scenarios currently run only in
+  `tests/h2_smoke.rs`.
+
 ## Running
 
 Server plus an in-process consistency check:
@@ -84,6 +108,20 @@ curl -s http://127.0.0.1:18080/small
 curl -s --http2-prior-knowledge http://127.0.0.1:18081/large
 curl -sk --http3-only https://localhost:18443/large
 ```
+
+## CI
+
+`.github/workflows/interop.yml` runs the whole matrix on every pull request.
+Client images are built in a separate step so a broken Dockerfile fails with a
+clear message rather than as a matrix full of container-start failures, and so
+docker's layer cache is warm before the tests start.
+
+`ZINCIO_INTEROP_REQUIRE=1` is set in CI: without it the suite skips itself when
+Docker is unreachable, which is convenient for contributors but must not hide a
+broken runner.
+
+`ZINCIO_INTEROP_CLIENTS=curl cargo test` restricts the run to named clients, which
+is how the cheap lane stays separate from the expensive image builds.
 
 ## Gotcha worth knowing
 

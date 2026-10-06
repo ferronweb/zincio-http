@@ -1,0 +1,53 @@
+name: Interop
+
+# Drives real third-party HTTP clients against the native server from
+# containers. See ../interop/README.md for what this buys and why.
+#
+# Every scenario runs on every pull request, as decided: the cheap clients build
+# their image in seconds, and a regression that only shows up against a real
+# client should not be able to sit on `main` for a day.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  # The suite skips itself when Docker is unreachable, which is convenient for
+  # contributors but must not hide a broken runner here.
+  ZINCIO_INTEROP_REQUIRE: "1"
+
+jobs:
+  interop:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: interop
+
+      - name: Build client images
+        # Built here so the images are warm before the tests start, and so a
+        # broken Dockerfile fails with a clear message instead of surfacing as
+        # a matrix full of container-start failures.
+        run: |
+          docker build --tag zincio-http-interop-curl:latest \
+            --target driver \
+            --file interop/docker/curl/Dockerfile \
+            interop
+
+      - name: Run interop matrix
+        working-directory: interop
+        run: cargo test -- --nocapture
+
+      - name: Upload driver logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-logs
+          path: interop/target/debug/../*.log
+          if-no-files-found: ignore

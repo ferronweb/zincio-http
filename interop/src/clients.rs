@@ -225,8 +225,44 @@ pub static QUIC_GO: ClientSpec = ClientSpec {
     build_context: Some("docker/quic-go"),
 };
 
+/// OkHttp over HTTP/1.1 and h2c: the JVM/Android HTTP stack.
+///
+/// OkHttp only negotiates HTTP/2 over TLS by default, so the driver selects
+/// Protocol.H2_PRIOR_KNOWLEDGE for cleartext URLs. Its HPACK encoder is the
+/// fifth independent one in the matrix. Response trailers are observed
+/// through Response.trailers(); 103 Early Hints are swallowed internally and
+/// therefore not claimed.
+pub static OKHTTP: ClientSpec = ClientSpec {
+    id: "okhttp",
+    name: "OkHttp (JVM)",
+    protocols: &[Protocol::Http1, Protocol::Http2],
+    capabilities: &[
+        Capability::Upload,
+        Capability::ResponseTrailers,
+        Capability::Concurrency,
+        Capability::ExpectContinue,
+        Capability::BigHeader,
+        Capability::LongUri,
+        Capability::ManyHeaders,
+    ],
+    image: Some(ImageSpec::Build {
+        tag: "zincio-http-interop-okhttp",
+        context: "okhttp",
+        target: "driver",
+    }),
+    entrypoint: Some(Entrypoint {
+        program: "java",
+        args: &[
+            "-cp",
+            "/app:/app/okhttp.jar:/app/okio.jar:/app/kotlin-stdlib.jar:/app/annotations.jar",
+            "OkHttpDriver",
+        ],
+    }),
+    build_context: Some("docker/okhttp"),
+};
+
 /// Every client currently in the matrix.
-pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO, &PYTHON_H2, &QUIC_GO];
+pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO, &PYTHON_H2, &QUIC_GO, &OKHTTP];
 
 /// The clients to run, honouring `ZINCIO_INTEROP_CLIENTS`.
 ///

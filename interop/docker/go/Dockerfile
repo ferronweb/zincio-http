@@ -10,6 +10,6 @@ WORKDIR /src
 COPY clients/go.mod clients/go.sum clients/go-driver.go ./
 RUN go mod download && CGO_ENABLED=0 go build -o /out/interop-driver ./go-driver.go
 
-FROM alpine:3.21 AS driver
+FROM alpine:3.24 AS driver
 COPY --from=build /out/interop-driver /usr/local/bin/interop-driver
 ENTRYPOINT ["/usr/local/bin/interop-driver"]

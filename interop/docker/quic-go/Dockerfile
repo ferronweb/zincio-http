@@ -9,7 +9,7 @@ WORKDIR /src
 COPY clients/quicgo/go.mod clients/quicgo/go.sum clients/quicgo/main.go ./
 RUN go mod download && CGO_ENABLED=0 go build -o /out/interop-driver ./main.go
 
-FROM alpine:3.21 AS driver
+FROM alpine:3.24 AS driver
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/interop-driver /usr/local/bin/interop-driver
 ENTRYPOINT ["/usr/local/bin/interop-driver"]

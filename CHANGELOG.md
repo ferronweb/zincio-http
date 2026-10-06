@@ -1,8 +1,8 @@
 # `zincio-http` change log
 
-## `zincio-http` UNRELEASED
+## `zincio-http` 0.4.11
 
-**Not yet released**
+**Released in October 6, 2026**
 
 - The HTTP/1.x server now sends 100 Continue interim responses instead of deadlocking (when using with OkHttp clients).
 

@@ -166,12 +166,16 @@ pub static PYTHON_H2: ClientSpec = ClientSpec {
     protocols: &[Protocol::Http2],
     capabilities: &[
         Capability::Upload,
+        // Response trailers arrive via the 'trailers' event and are verified
+        // working. Request trailers are absent on purpose: Node's
+        // ClientHttp2Stream has no addTrailers (server-side only), so they
+        // cannot be sent at all.
         Capability::ResponseTrailers,
-        Capability::RequestTrailers,
         Capability::Concurrency,
         Capability::Abort,
-        Capability::ExpectContinue,
-        Capability::EarlyHints,
+        // No EarlyHints: Node swallows 103, emitting only the final response.
+        // No ExpectContinue: the driver does not perform the 100-continue
+        // dance, so claiming it would exercise nothing.
         Capability::BigHeader,
         Capability::LongUri,
         Capability::ManyHeaders,
@@ -261,8 +265,47 @@ pub static OKHTTP: ClientSpec = ClientSpec {
     build_context: Some("docker/okhttp"),
 };
 
+/// Node stdlib http2 over h2c: the JavaScript runtime's HTTP/2 stack.
+///
+/// Node connects with h2c prior knowledge for http: URLs, so no TLS setup is
+/// needed. Its HPACK encoder is the sixth independent one in the matrix.
+/// Trailer and 103 observation ride on the standard events; capabilities are
+/// declared from what the driver verifies rather than assumed.
+pub static NODE: ClientSpec = ClientSpec {
+    id: "node",
+    name: "Node http2",
+    protocols: &[Protocol::Http2],
+    capabilities: &[
+        Capability::Upload,
+        // Response trailers arrive via the 'trailers' event and are verified
+        // working. Request trailers are absent on purpose: Node's
+        // ClientHttp2Stream has no addTrailers (server-side only), so they
+        // cannot be sent at all.
+        Capability::ResponseTrailers,
+        Capability::Concurrency,
+        Capability::Abort,
+        // No EarlyHints: Node swallows 103, emitting only the final response.
+        // No ExpectContinue: the driver does not perform the 100-continue
+        // dance, so claiming it would exercise nothing.
+        Capability::BigHeader,
+        Capability::LongUri,
+        Capability::ManyHeaders,
+        Capability::IdleReuse,
+    ],
+    image: Some(ImageSpec::Build {
+        tag: "zincio-http-interop-node",
+        context: "node",
+        target: "driver",
+    }),
+    entrypoint: Some(Entrypoint {
+        program: "node",
+        args: &["/usr/local/bin/interop-driver"],
+    }),
+    build_context: Some("docker/node"),
+};
+
 /// Every client currently in the matrix.
-pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO, &PYTHON_H2, &QUIC_GO, &OKHTTP];
+pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO, &PYTHON_H2, &QUIC_GO, &OKHTTP, &NODE];
 
 /// The clients to run, honouring `ZINCIO_INTEROP_CLIENTS`.
 ///

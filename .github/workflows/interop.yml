@@ -70,6 +70,61 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build Node image
+        uses: docker/build-push-action@v6
+        with:
+          context: interop
+          file: interop/docker/node/Dockerfile
+          target: driver
+          tags: zincio-http-interop-node:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build quic-go image (HTTP/3)
+        uses: docker/build-push-action@v6
+        with:
+          context: interop
+          file: interop/docker/quic-go/Dockerfile
+          target: driver
+          tags: zincio-http-interop-quic-go:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build OkHttp image
+        uses: docker/build-push-action@v6
+        with:
+          context: interop
+          file: interop/docker/okhttp/Dockerfile
+          target: driver
+          tags: zincio-http-interop-okhttp:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Go image
+        uses: docker/build-push-action@v6
+        with:
+          context: interop
+          file: interop/docker/go/Dockerfile
+          target: driver
+          tags: zincio-http-interop-go:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build python-h2 image
+        uses: docker/build-push-action@v6
+        with:
+          context: interop
+          file: interop/docker/python-h2/Dockerfile
+          target: driver
+          tags: zincio-http-interop-python-h2:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Build aioquic image (HTTP/3)
         uses: docker/build-push-action@v6
         with:

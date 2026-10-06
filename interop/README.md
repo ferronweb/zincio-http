@@ -75,6 +75,10 @@ Registered clients, and what each can actually observe:
 | `curl` (ngtcp2, from source) | HTTP/3 | 9 scenario runs |
 | `aioquic` (Python QPACK) | HTTP/3 | 41 scenario runs, incl. 32-way concurrency |
 | `Go` (x/net HPACK) | HTTP/1.1, HTTP/2 | 78 scenario runs, incl. 32-way concurrency |
+| `OkHttp` (JVM HPACK) | HTTP/1.1, HTTP/2 | 80 scenario runs, incl. 32-way concurrency |
+| `Python hyper-h2` | HTTP/2 | 44 scenario runs, incl. H2 103 observation |
+| `quic-go` | HTTP/3 | 44 scenario runs, full H3 matrix |
+| `Node` (stdlib http2) | HTTP/2 | 41 scenario runs, incl. 32-way concurrency |
 
 Not yet covered:
 

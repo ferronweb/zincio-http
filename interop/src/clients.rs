@@ -97,8 +97,31 @@ pub static AIOQUIC: ClientSpec = ClientSpec {
     build_context: Some("docker/aioquic"),
 };
 
+/// curl over HTTP/3, built from source against ngtcp2.
+///
+/// A separate client rather than extra protocols on [`CURL`] because the image
+/// is expensive: keeping it distinct lets the cheap curl image stay in the
+/// per-pull-request path while this one is built and cached separately. Shares
+/// curl's conservative capability set: it cannot observe trailers or 1xx.
+pub static CURL_HTTP3: ClientSpec = ClientSpec {
+    id: "curl-http3",
+    name: "curl (HTTP/3, ngtcp2)",
+    protocols: &[Protocol::Http3],
+    capabilities: CURL_CAPABILITIES,
+    image: Some(ImageSpec::Build {
+        tag: "zincio-http-interop-curl-http3",
+        context: "curl",
+        target: "http3",
+    }),
+    entrypoint: Some(Entrypoint {
+        program: "/usr/local/bin/interop-driver",
+        args: &[],
+    }),
+    build_context: Some("docker/curl"),
+};
+
 /// Every client currently in the matrix.
-pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC];
+pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3];
 
 /// The clients to run, honouring `ZINCIO_INTEROP_CLIENTS`.
 ///

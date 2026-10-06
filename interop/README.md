@@ -80,7 +80,9 @@ Registered clients, and what each can actually observe:
 | `quic-go` | HTTP/3 | 44 scenario runs, full H3 matrix |
 | `Node` (stdlib http2) | HTTP/2 | 41 scenario runs, incl. 32-way concurrency |
 
-Not yet covered:
+Not yet covered (summary — the full inventory lives in [LIMITATIONS.md](./LIMITATIONS.md),
+which also lists empty matrix cells, thin single-runner cells, and deliberate
+scope exclusions):
 
 - **Concurrent streams over HTTP/1.1.** Pipelining aside, HTTP/1.1 has no
   multiplexing, so the concurrency scenario only runs over HTTP/2 and HTTP/3

@@ -13,7 +13,7 @@
 # the official image has no HTTP/3, and every HTTP/3-capable curl image on a
 # registry is a stale personal build (`ymuski/curl-http3:8.2.1` dates from 2022).
 
-ARG CURL_IMAGE=curlimages/curl:8.21.0
+ARG CURL_IMAGE=curlimages/curl:8.22.0
 
 # No packages are installed here on purpose: `curlimages/curl` runs as a
 # non-root user, so `apk add` cannot run in this stage. Everything the driver

@@ -4,7 +4,7 @@
 # net/http driver uses. Versions are pinned (toolchain, quic-go, go.sum) so an
 # upstream release cannot turn into an unexplained failure here.
 
-FROM golang:1.26-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY clients/quicgo/go.mod clients/quicgo/go.sum clients/quicgo/main.go ./
 RUN go mod download && CGO_ENABLED=0 go build -o /out/interop-driver ./main.go

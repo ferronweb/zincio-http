@@ -5,7 +5,7 @@
 # control strategy differs from both. The version pins are deliberate: a moving
 # toolchain or x/net would turn an upstream change into an unexplained failure.
 
-FROM golang:1.24-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY clients/go.mod clients/go.sum clients/go-driver.go ./
 RUN go mod download && CGO_ENABLED=0 go build -o /out/interop-driver ./go-driver.go

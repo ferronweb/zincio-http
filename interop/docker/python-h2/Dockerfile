@@ -5,7 +5,7 @@
 # version is pinned rather than tracked to latest, so an upstream release
 # cannot turn into an unexplained failure here.
 
-FROM python:3.13-slim AS driver
+FROM python:3.14-slim AS driver
 RUN pip install --no-cache-dir "h2==4.4.1"
 COPY --chmod=0755 clients/h2-driver.py /usr/local/bin/interop-driver
 ENTRYPOINT ["/usr/local/bin/interop-driver"]

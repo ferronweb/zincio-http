@@ -6,7 +6,8 @@
 # cannot turn into an unexplained failure here. Jars are fetched from Maven
 # Central at build time rather than committed to git.
 
-FROM eclipse-temurin:21-jdk AS build
+FROM eclipse-temurin:25-jdk AS build
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . ./
 RUN curl -fsSL -o okhttp.jar https://repo1.maven.org/maven2/com/squareup/okhttp3/okhttp/4.12.0/okhttp-4.12.0.jar \
@@ -17,6 +18,6 @@ RUN curl -fsSL -o okhttp.jar https://repo1.maven.org/maven2/com/squareup/okhttp3
         -d /out OkHttpDriver.java \
  && cp okhttp.jar okio.jar kotlin-stdlib.jar annotations.jar /out/
 
-FROM eclipse-temurin:21-jre AS driver
+FROM eclipse-temurin:25-jre AS driver
 COPY --from=build /out /app
 ENTRYPOINT ["java", "-cp", "/app:/app/okhttp.jar:/app/okio.jar:/app/kotlin-stdlib.jar:/app/annotations.jar", "OkHttpDriver"]

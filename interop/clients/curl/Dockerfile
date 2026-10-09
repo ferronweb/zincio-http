@@ -20,7 +20,7 @@ ARG CURL_IMAGE=curlimages/curl:8.22.0
 # needs (curl, sha256sum, awk, printf) is already present; sha256sum and awk come
 # from busybox.
 FROM ${CURL_IMAGE} AS driver
-COPY --chmod=0755 clients/curl-driver.sh /usr/local/bin/interop-driver
+COPY --chmod=0755 curl-driver.sh /usr/local/bin/interop-driver
 ENTRYPOINT ["/usr/local/bin/interop-driver"]
 
 # ---------------------------------------------------------------------------
@@ -78,5 +78,5 @@ RUN apk add --no-cache \
 COPY --from=ngtcp2-build /usr/local/lib/libngtcp2.so* /usr/local/lib/
 COPY --from=ngtcp2-build /usr/local/lib/libngtcp2_crypto_ossl.so* /usr/local/lib/
 COPY --from=http3-build /src/curl/build/src/curl /usr/local/bin/curl
-COPY --chmod=0755 clients/curl-driver.sh /usr/local/bin/interop-driver
+COPY --chmod=0755 curl-driver.sh /usr/local/bin/interop-driver
 ENTRYPOINT ["/usr/local/bin/interop-driver"]

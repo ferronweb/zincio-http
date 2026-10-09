@@ -215,7 +215,7 @@ pub struct ClientSpec {
     /// The driver receives the base URL, protocol, and scenario name as
     /// positional arguments, and prints one [`Observation`] line on stdout.
     pub entrypoint: Option<Entrypoint>,
-    /// Whether the image must be built from `docker/` before use.
+    /// Whether the image must be built from `clients/` before use.
     pub build_context: Option<&'static str>,
 }
 
@@ -231,7 +231,7 @@ pub enum ImageSpec {
     Build {
         /// Image name to tag the build result with.
         tag: &'static str,
-        /// Directory under `interop/docker/` holding the Dockerfile.
+        /// Directory under `interop/clients/` holding the Dockerfile.
         context: &'static str,
         /// Build stage to stop at. One Dockerfile can serve several images, so
         /// a fast image and a slow one do not force each other to be built.

@@ -170,7 +170,7 @@ fn registry_image(reference: &str) -> GenericImage {
     GenericImage::new(image, tag)
 }
 
-/// Builds an image from a checked-in Dockerfile under `interop/docker/`.
+/// Builds an image from a checked-in Dockerfile under `interop/clients/`.
 ///
 /// This shells out to `docker build` rather than using testcontainers'
 /// `GenericBuildableImage`. That builder copies sources in through its own
@@ -180,10 +180,7 @@ fn registry_image(reference: &str) -> GenericImage {
 /// testcontainers still owns the container lifecycle, which is the part that
 /// actually benefits from its abstraction.
 fn build_image(tag: &str, context: &str, target: &str) -> Result<GenericImage, String> {
-    // The build context is the whole crate, not the Dockerfile's own
-    // directory, so driver scripts can stay in one shared `clients/` tree
-    // instead of being duplicated per image.
-    let context_dir = crate_dir();
+    let context_dir = docker_dir().join(context);
     let dockerfile = docker_dir().join(context).join("Dockerfile");
     if !dockerfile.exists() {
         return Err(format!("missing Dockerfile {}", dockerfile.display()));
@@ -215,9 +212,9 @@ fn build_image(tag: &str, context: &str, target: &str) -> Result<GenericImage, S
     Ok(GenericImage::new(tag, "latest"))
 }
 
-/// Locates `interop/docker` relative to this crate's manifest directory.
+/// Locates `interop/clients` relative to this crate's manifest directory.
 fn docker_dir() -> PathBuf {
-    crate_dir().join("docker")
+    crate_dir().join("clients")
 }
 
 /// Root of this crate, used as the docker build context.
@@ -258,7 +255,17 @@ mod tests {
         // A typo in a build context would only surface as a container start
         // failure deep into the matrix, so it is checked directly.
         assert!(docker_dir().exists(), "{} missing", docker_dir().display());
-        for context in ["curl", "aioquic", "go", "python-h2", "quic-go", "okhttp", "node", "quiche", "neqo"] {
+        for context in [
+            "curl",
+            "aioquic",
+            "go",
+            "python-h2",
+            "quic-go",
+            "okhttp",
+            "node",
+            "quiche",
+            "neqo",
+        ] {
             assert!(
                 docker_dir().join(context).join("Dockerfile").exists(),
                 "missing Dockerfile for {context}"

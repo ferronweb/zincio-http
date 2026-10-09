@@ -8,5 +8,5 @@
 
 FROM python:3.14-slim AS driver
 RUN pip install --no-cache-dir "aioquic==1.3.0"
-COPY --chmod=0755 clients/aioquic-driver.py /usr/local/bin/interop-driver
+COPY --chmod=0755 aioquic-driver.py /usr/local/bin/interop-driver
 ENTRYPOINT ["/usr/local/bin/interop-driver"]

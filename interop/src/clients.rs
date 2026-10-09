@@ -31,7 +31,7 @@ const CURL_CAPABILITIES: &[Capability] = &[
 ///
 /// An HTTP/3-capable curl is not registered yet: building one requires a
 /// source build whose CMake configure step is still unresolved. See the
-/// recipe left in `docker/curl/Dockerfile`.
+/// recipe left in `clients/curl/Dockerfile`.
 ///
 /// curl is the client that found the 0.4.2 HTTP/3 stream reset, and it is on
 /// every CI runner, so it earns its place twice: as an independent
@@ -50,7 +50,7 @@ pub static CURL: ClientSpec = ClientSpec {
         program: "/usr/local/bin/interop-driver",
         args: &[],
     }),
-    build_context: Some("docker/curl"),
+    build_context: Some("clients/curl"),
 };
 
 /// aioquic over HTTP/3: an independent Python QUIC + QPACK stack.
@@ -94,7 +94,7 @@ pub static AIOQUIC: ClientSpec = ClientSpec {
         program: "/usr/local/bin/interop-driver",
         args: &[],
     }),
-    build_context: Some("docker/aioquic"),
+    build_context: Some("clients/aioquic"),
 };
 
 /// curl over HTTP/3, built from source against ngtcp2.
@@ -117,7 +117,7 @@ pub static CURL_HTTP3: ClientSpec = ClientSpec {
         program: "/usr/local/bin/interop-driver",
         args: &[],
     }),
-    build_context: Some("docker/curl"),
+    build_context: Some("clients/curl"),
 };
 
 /// Go net/http over HTTP/1.1 and h2c, built from a checked-in program.
@@ -152,7 +152,7 @@ pub static GO: ClientSpec = ClientSpec {
         program: "/usr/local/bin/interop-driver",
         args: &[],
     }),
-    build_context: Some("docker/go"),
+    build_context: Some("clients/go"),
 };
 
 /// hyper-h2 over HTTP/2: the popular Python HTTP/2 stack with raw frame control.
@@ -190,7 +190,7 @@ pub static PYTHON_H2: ClientSpec = ClientSpec {
         program: "/usr/local/bin/interop-driver",
         args: &[],
     }),
-    build_context: Some("docker/python-h2"),
+    build_context: Some("clients/python-h2"),
 };
 
 /// quic-go over HTTP/3: the Go QUIC stack behind Caddy and many CDNs.
@@ -226,7 +226,7 @@ pub static QUIC_GO: ClientSpec = ClientSpec {
         program: "/usr/local/bin/interop-driver",
         args: &[],
     }),
-    build_context: Some("docker/quic-go"),
+    build_context: Some("clients/quic-go"),
 };
 
 /// OkHttp over HTTP/1.1 and h2c: the JVM/Android HTTP stack.
@@ -262,7 +262,7 @@ pub static OKHTTP: ClientSpec = ClientSpec {
             "OkHttpDriver",
         ],
     }),
-    build_context: Some("docker/okhttp"),
+    build_context: Some("clients/okhttp"),
 };
 
 /// Node stdlib http2 over h2c: the JavaScript runtime's HTTP/2 stack.
@@ -301,7 +301,7 @@ pub static NODE: ClientSpec = ClientSpec {
         program: "node",
         args: &["/usr/local/bin/interop-driver"],
     }),
-    build_context: Some("docker/node"),
+    build_context: Some("clients/node"),
 };
 
 /// quiche over HTTP/3: Cloudflare's QUIC stack behind its edge and cloudflared.
@@ -339,7 +339,7 @@ pub static QUICHE: ClientSpec = ClientSpec {
         program: "/usr/local/bin/interop-driver",
         args: &[],
     }),
-    build_context: Some("docker/quiche"),
+    build_context: Some("clients/quiche"),
 };
 
 /// neqo over HTTP/3: Mozilla's QUIC stack used in Firefox.
@@ -376,11 +376,22 @@ pub static NEQO: ClientSpec = ClientSpec {
         program: "/usr/local/bin/interop-driver",
         args: &[],
     }),
-    build_context: Some("docker/neqo"),
+    build_context: Some("clients/neqo"),
 };
 
 /// Every client currently in the matrix.
-pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO, &PYTHON_H2, &QUIC_GO, &OKHTTP, &NODE, &QUICHE, &NEQO];
+pub static ALL_CLIENTS: &[&ClientSpec] = &[
+    &CURL,
+    &AIOQUIC,
+    &CURL_HTTP3,
+    &GO,
+    &PYTHON_H2,
+    &QUIC_GO,
+    &OKHTTP,
+    &NODE,
+    &QUICHE,
+    &NEQO,
+];
 
 /// The clients to run, honouring `ZINCIO_INTEROP_CLIENTS`.
 ///
@@ -447,14 +458,14 @@ mod tests {
 
     #[test]
     fn every_client_image_has_a_dockerfile() {
-        let docker_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docker");
+        let docker_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("clients");
         for client in ALL_CLIENTS {
             let Some(crate::client::ImageSpec::Build { context, .. }) = client.image else {
                 continue;
             };
             assert!(
                 docker_dir.join(context).join("Dockerfile").exists(),
-                "{}: missing docker/{context}/Dockerfile",
+                "{}: missing clients/{context}/Dockerfile",
                 client.id
             );
         }

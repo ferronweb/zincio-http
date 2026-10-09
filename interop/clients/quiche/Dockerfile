@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake g++ make perl golang pkg-config libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-COPY clients/quiche/Cargo.toml clients/quiche/Cargo.lock ./
-COPY clients/quiche/src ./src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
 RUN cargo build --locked --release \
     && mkdir -p /out \
     && cp target/release/interop-driver /out/interop-driver

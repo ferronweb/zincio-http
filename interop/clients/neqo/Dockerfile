@@ -19,8 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libnss3-dev libnspr4-dev zlib1g-dev libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-COPY clients/neqo/Cargo.toml clients/neqo/Cargo.lock ./
-COPY clients/neqo/src ./src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
 # Bookworm's NSS (3.87) predates nss-rs's minimum (3.126), so build Mozilla's
 # pinned NSS release from source instead of using the system one.
 ENV NSS_NO_PKG_CONFIG=1

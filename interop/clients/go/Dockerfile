@@ -7,7 +7,7 @@
 
 FROM golang:1.27-alpine AS build
 WORKDIR /src
-COPY clients/go.mod clients/go.sum clients/go-driver.go ./
+COPY . ./
 RUN go mod download && CGO_ENABLED=0 go build -o /out/interop-driver ./go-driver.go
 
 FROM alpine:3.24 AS driver

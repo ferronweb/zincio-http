@@ -8,7 +8,7 @@
 
 FROM eclipse-temurin:21-jdk AS build
 WORKDIR /src
-COPY clients/okhttp/OkHttpDriver.java ./
+COPY . ./
 RUN curl -fsSL -o okhttp.jar https://repo1.maven.org/maven2/com/squareup/okhttp3/okhttp/4.12.0/okhttp-4.12.0.jar \
  && curl -fsSL -o okio.jar https://repo1.maven.org/maven2/com/squareup/okio/okio-jvm/3.6.0/okio-jvm-3.6.0.jar \
  && curl -fsSL -o kotlin-stdlib.jar https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/1.9.22/kotlin-stdlib-1.9.22.jar \

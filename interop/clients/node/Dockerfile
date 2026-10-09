@@ -5,5 +5,5 @@
 # unexplained failure here.
 
 FROM node:22-slim AS driver
-COPY --chmod=0755 clients/node-driver.mjs /usr/local/bin/interop-driver
+COPY --chmod=0755 node-driver.mjs /usr/local/bin/interop-driver
 ENTRYPOINT ["node", "/usr/local/bin/interop-driver"]

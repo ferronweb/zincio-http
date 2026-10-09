@@ -10,7 +10,7 @@ edition = "2021"
 
 [dependencies]
 quiche = "=0.30.0"
-sha2 = "=0.10.9"
+sha2 = "=0.11.0"
 
 [[bin]]
 name = "interop-driver"

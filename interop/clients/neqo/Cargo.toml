@@ -15,7 +15,7 @@ neqo-common = { git = "https://github.com/mozilla/neqo", rev = "cce5f8f4e8c94d7d
 neqo-http3 = { git = "https://github.com/mozilla/neqo", rev = "cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c" }
 neqo-transport = { git = "https://github.com/mozilla/neqo", rev = "cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c" }
 nss = { package = "nss-rs", git = "https://github.com/mozilla/nss-rs" }
-sha2 = "=0.10.9"
+sha2 = "=0.11.0"
 
 [[bin]]
 name = "interop-driver"

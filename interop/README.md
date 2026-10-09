@@ -1,53 +1,28 @@
-# `zincio-http` interop harness
+# `zincio-http` interop testing setup
 
-Drives **real, third-party HTTP clients** against the native `zincio-http`
-server, so that bugs a from-scratch HTTP/2 or HTTP/3 implementation can have --
-but a same-implementation test client cannot see -- are caught before release.
-
-This crate lives **outside the main workspace**. It depends on the library by
-path (exactly like `../fuzz`), which gives it its own `Cargo.lock` and `target/`
-and keeps `testcontainers` and the client image build out of the published
-crate's dependency tree.
+This test setup tests various HTTP clients against a `zincio-http` server to catch interop issues, primarly for HTTP/2 and HTTP/3 implementations.
 
 ## Why this exists
 
-Every bug in `zincio-http`'s changelog that a *real external* client found
-escaped the automated suite:
+Several bugs in `zincio-http`'s changelog were found by running a real-world HTTP client against the server, such as:
 
 | Version | Bug | Found by |
 | --- | --- | --- |
 | 0.4.2 | max-frame-size `SETTINGS` asymmetry -> frame-size mismatch | libnghttp2 |
 | 0.4.2 | `curl: (18) stream 0 reset` on HTTP/3 | curl |
 | 0.4.8 | flow-control reset on large response bodies | hyper |
-
-All three are in flow control, `SETTINGS` negotiation, and stream
-termination. Those are exactly the areas where two implementations can share
-the *same* misreading of an RFC and still agree with each other, so testing
-only against an in-repo reference client cannot catch them.
-
-## Layout
-
-| Path | Purpose |
-| --- | --- |
-| `src/scenario.rs` | The declarative scenario matrix. Single source of truth for what is tested and what is expected. |
-| `src/routes.rs` | Request handler serving exactly those scenarios. |
-| `src/server.rs` | Starts HTTP/1.1, HTTP/2 (h2c), and HTTP/3 (QUIC) listeners. |
-| `src/client.rs` | Driver abstraction plus the normalised observation format every client reports in. |
-| `src/container.rs` | `testcontainers`-backed drivers for third-party clients. |
-| `tests/h2_smoke.rs` | Container-free consistency check of the matrix itself. |
-| `docker/` | Pinned Dockerfiles for clients with no trustworthy prebuilt image. |
-| `clients/` | Small client programs copied into images (Go, Node, Python). |
+| 0.4.11 | 100 Continue response-related deadlocks | OkHttp |
 
 ## Design notes
 
 **The matrix is authoritative.** Each scenario declares the status, body
-length, and body digest it expects. A client driver only reports *what it
-observed*; the Rust harness decides whether that is correct. Otherwise every new
+length, and body digest it expects. A client driver only reports what it
+observed; the test matrix decides whether that is correct. Otherwise every new
 client would re-encode the same expectations and drift.
 
 **Bodies are a repeating `ABCD` pattern.** A repeating 4-byte sequence rather
 than a single byte means a SHA-256 over the body detects truncation,
-duplication, *and* reordering, while remaining cheap to generate for a 64 MiB
+duplication, and reordering, while remaining cheap to generate for a 64 MiB
 response. The digest is computed by the harness from the same pattern bytes,
 so it is never duplicated in a client script.
 
@@ -82,7 +57,7 @@ Registered clients, and what each can actually observe:
 | `neqo` (Firefox QUIC) | HTTP/3 | 43 scenario runs, full H3 matrix except trailers |
 | `Node` (stdlib http2) | HTTP/2 | 41 scenario runs, incl. 32-way concurrency |
 
-Not yet covered (summary — the full inventory lives in [LIMITATIONS.md](./LIMITATIONS.md),
+Not covered (see [LIMITATIONS.md](./LIMITATIONS.md),
 which also lists empty matrix cells, thin single-runner cells, and deliberate
 scope exclusions):
 
@@ -90,8 +65,8 @@ scope exclusions):
   multiplexing, so the concurrency scenario only runs over HTTP/2 and HTTP/3.
 - **103 Early Hints and 100 Continue as observed by a containerised client.**
   Over HTTP/3 they are covered by quic-go, quiche, and neqo (aioquic tears
-  down the connection on any 1xx-then-final exchange -- its HEADERS state
-  machine has no informational state -- and curl cannot surface 1xx at all).
+  down the connection on any 1xx-then-final exchange, so its HEADERS state
+  machine has no informational state, and curl cannot surface 1xx at all).
   Over HTTP/2 and HTTP/1.1 the only 103 observer is Go, so those two scenarios
   additionally run in `tests/h2_smoke.rs` and the in-repo fixture tests.
 - **Trailers as observed by a containerised client.** Over HTTP/3 they are
@@ -123,14 +98,12 @@ curl -sk --http3-only https://localhost:18443/large
 
 ## Why no web browsers
 
-Web browsers are deliberately absent from the matrix, even though they are the
-most common HTTP clients in existence. Every major browser ships a bespoke
-HTTP stack that cannot be driven as a script client:
+Every major web browser ships a custom HTTP stack that cannot be used in a script client:
 
 | Browser | HTTP/2 | HTTP/3 / QUIC | TLS |
 | --- | --- | --- | --- |
 | Chrome / Edge | Custom (`Http2Session`, BoringSSL) | Custom (Cronet QUIC) | BoringSSL |
-| Firefox | Custom (`nsHttp`, Necko) | neqo (Rust) | NSS |
+| Firefox | Custom (`nsHttp`, Necko) | neqo (Rust, though this alone is tested in HTTP/3 setup) | NSS |
 | Safari | Custom (CFNetwork) | Custom (Network.framework) | SecureTransport |
 
 Concretely, a browser cannot do what this matrix needs:
@@ -139,22 +112,22 @@ Concretely, a browser cannot do what this matrix needs:
   block, reset a stream mid-response, or observe a 103 separately from the
   final response. Browsers expose navigation-level APIs (fetch, XHR), not
   frames. Headless Chrome via CDP can capture what happened
-  (`Network.responseReceivedExtraInfo` shows 103s), but it cannot *cause* a
+  (`Network.responseReceivedExtraInfo` shows 103s), but it cannot cause a
   mid-stream reset on demand.
 - **No trust-anchor flexibility in automation.** The scenario server uses a
   fresh self-signed certificate per run. Browsers can be told to ignore it
   (`--ignore-certificate-errors`), but that flag also disables the very TLS
   alert paths conformance cares about.
 - **Shared fate with the OS resolver and proxy.** Containers give each client
-  a reproducible network namespace; browsers inherit the host's.
+  a reproducible network namespace. Browsers in the other hand inherit the host's.
 
-What covers the browser-shaped traffic instead: curl (the same nghttp2 that
-ships in many embeddings), OkHttp (the Android stack, which *is* a browser
-engine's sibling on that platform), and the `h2spec` strict suite, which
-encodes the RFC requirements browsers depend on. If browser coverage is ever
-needed, the honest route is headless Chrome driven over CDP against the
-scenario server with `--host-resolver-rules` pinning the test origin --
-a separate harness, not an extension of this one, because assertions would be
+What might cover the browser-shaped traffic instead:
+- curl (the same nghttp2 that ships in many embeddings)
+- OkHttp (the Android stack, which is a browser engine's sibling on that platform)
+- the `h2spec` strict suite, which encodes the RFC requirements browsers depend on.
+ 
+If browser coverage is ever needed, the possible route is headless Chrome driven over CDP, but this would
+belong in another setup, because assertions would be
 about page loads rather than the observation lines defined here.
 
 ## CI
@@ -173,10 +146,10 @@ is how the cheap lane stays separate from the expensive image builds.
 
 ## Gotcha worth knowing
 
-The `h2` crate's `RecvStream` **never replenishes its flow-control window on
-its own**. Its documentation is explicit that the caller must call
+The `h2` crate's `RecvStream` never replenishes its flow-control window on
+its own. Its documentation is explicit that the caller must call
 `flow_control().release_capacity(n)` after consuming data. A driver that
 omits this stalls at exactly the advertised window (65535 bytes with the
-default settings) and looks like a server-side flow-control bug -- which is
+default settings) and looks like a server-side flow-control bug, which is
 very nearly what it looked like before `tests/h2_smoke.rs` existed. See
 `read_response` in that file for the correct pattern.

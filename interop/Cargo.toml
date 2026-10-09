@@ -18,7 +18,7 @@ http-body = "1"
 http-body-util = "0.1"
 quinn = "0.11"
 rcgen = "0.14"
-sha2 = "0.10"
+sha2 = "0.11"
 testcontainers = "0.28"
 tokio = { version = "1", features = ["full"] }
 zincio = { version = "0.2.22", default-features = false, features = ["time"] }

@@ -52,7 +52,8 @@ pub fn pattern_chunk(offset: u64, len: usize) -> Vec<u8> {
 pub fn digest_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// What a client is expected to observe for a single request.

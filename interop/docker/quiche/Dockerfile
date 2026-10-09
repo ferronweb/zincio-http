@@ -10,7 +10,7 @@
 # stage needs a C++ toolchain plus cmake, perl, and Go (BoringSSL's build
 # script is written in Go). The runtime carries only the static binary.
 
-FROM rust:1.89-bookworm AS build
+FROM rust:1.99-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake g++ make perl golang pkg-config libclang-dev \
     && rm -rf /var/lib/apt/lists/*

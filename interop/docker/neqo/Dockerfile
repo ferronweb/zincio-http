@@ -13,7 +13,7 @@
 # either case.
 
 # The toolchain is newer than quiche's: neqo main requires rustc 1.90+.
-FROM rust:1.93-bookworm AS build
+FROM rust:1.99-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential clang cmake pkg-config python3 perl gyp ninja-build \
         libnss3-dev libnspr4-dev zlib1g-dev libclang-dev \

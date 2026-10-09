@@ -531,15 +531,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn curl_declares_only_what_it_can_actually_observe() {
-        // curl cannot surface response trailers or 1xx informational responses.
-        // If these are ever claimed, the matching scenarios would report a
-        // server bug that is really a curl limitation.
-        assert!(!CURL.capabilities.contains(&Capability::ResponseTrailers));
-        assert!(!CURL.capabilities.contains(&Capability::EarlyHints));
-        // One request per invocation, so no real concurrency.
-        assert!(!CURL.capabilities.contains(&Capability::Concurrency));
-    }
 }

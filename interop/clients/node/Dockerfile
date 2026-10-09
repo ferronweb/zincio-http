@@ -4,6 +4,6 @@
 # needed. The version is pinned so an upstream release cannot turn into an
 # unexplained failure here.
 
-FROM node:22-slim AS driver
+FROM node:24-slim AS driver
 COPY --chmod=0755 node-driver.mjs /usr/local/bin/interop-driver
 ENTRYPOINT ["node", "/usr/local/bin/interop-driver"]

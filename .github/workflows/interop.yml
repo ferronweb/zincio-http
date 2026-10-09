@@ -126,7 +126,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build quiche image (HTTP/3)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: interop
           file: interop/docker/quiche/Dockerfile
@@ -137,7 +137,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build neqo image (HTTP/3)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: interop
           file: interop/docker/neqo/Dockerfile

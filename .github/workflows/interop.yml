@@ -125,6 +125,28 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build quiche image (HTTP/3)
+        uses: docker/build-push-action@v6
+        with:
+          context: interop
+          file: interop/docker/quiche/Dockerfile
+          target: driver
+          tags: zincio-http-interop-quiche:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build neqo image (HTTP/3)
+        uses: docker/build-push-action@v6
+        with:
+          context: interop
+          file: interop/docker/neqo/Dockerfile
+          target: driver
+          tags: zincio-http-interop-neqo:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Run interop matrix
         working-directory: interop
         run: cargo test -- --nocapture

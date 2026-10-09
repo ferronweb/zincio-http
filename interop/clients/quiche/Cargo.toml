@@ -1,0 +1,17 @@
+[package]
+name = "interop-driver-quiche"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Pinned indirectly: the driver image builds with `cargo build --locked`
+# against the committed Cargo.lock, so an upstream release cannot turn into
+# an unexplained failure here.
+
+[dependencies]
+quiche = "=0.29.3"
+sha2 = "=0.10.9"
+
+[[bin]]
+name = "interop-driver"
+path = "src/main.rs"

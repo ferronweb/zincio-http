@@ -78,6 +78,8 @@ Registered clients, and what each can actually observe:
 | `OkHttp` (JVM HPACK) | HTTP/1.1, HTTP/2 | 80 scenario runs, incl. 32-way concurrency |
 | `Python hyper-h2` | HTTP/2 | 44 scenario runs, incl. H2 103 observation |
 | `quic-go` | HTTP/3 | 44 scenario runs, full H3 matrix |
+| `quiche` (Cloudflare QUIC) | HTTP/3 | 44 scenario runs, full H3 matrix |
+| `neqo` (Firefox QUIC) | HTTP/3 | 43 scenario runs, full H3 matrix except trailers |
 | `Node` (stdlib http2) | HTTP/2 | 41 scenario runs, incl. 32-way concurrency |
 
 Not yet covered (summary — the full inventory lives in [LIMITATIONS.md](./LIMITATIONS.md),
@@ -85,13 +87,19 @@ which also lists empty matrix cells, thin single-runner cells, and deliberate
 scope exclusions):
 
 - **Concurrent streams over HTTP/1.1.** Pipelining aside, HTTP/1.1 has no
-  multiplexing, so the concurrency scenario only runs over HTTP/2 and HTTP/3
-  (via Go and aioquic respectively).
+  multiplexing, so the concurrency scenario only runs over HTTP/2 and HTTP/3.
 - **103 Early Hints and 100 Continue as observed by a containerised client.**
-  aioquic tears down the connection on any 1xx-then-final exchange (its HEADERS
-  state machine has no informational state) and curl cannot surface 1xx at
-  all, so those two scenarios run only in `tests/h2_smoke.rs` and the in-repo
-  fixture tests. Response trailers *are* covered, via aioquic.
+  Over HTTP/3 they are covered by quic-go, quiche, and neqo (aioquic tears
+  down the connection on any 1xx-then-final exchange -- its HEADERS state
+  machine has no informational state -- and curl cannot surface 1xx at all).
+  Over HTTP/2 and HTTP/1.1 the only 103 observer is Go, so those two scenarios
+  additionally run in `tests/h2_smoke.rs` and the in-repo fixture tests.
+- **Trailers as observed by a containerised client.** Over HTTP/3 they are
+  covered by aioquic, quic-go, and quiche (curl-http3 cannot surface them, and
+  neqo's client ignores response trailers by design). Over HTTP/1.1 and
+  HTTP/2 no client both sends request trailers and observes response trailers
+  yet, so the scenario runs only in `tests/h2_smoke.rs` and the in-repo
+  fixture tests.
 
 ## Running
 

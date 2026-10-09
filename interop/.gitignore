@@ -1,2 +1,7 @@
 target/
 Cargo.lock
+
+# ...but the Rust driver crates keep their lockfiles (like the Go drivers keep
+# go.sum), so their images build reproducibly with `cargo build --locked`.
+!clients/quiche/Cargo.lock
+!clients/neqo/Cargo.lock

@@ -5,7 +5,7 @@ mistaken for a complete one. Each entry says whether the gap is a missing
 scenario (nothing drives it), a missing client capability (a scenario exists
 but no client can run it over some protocol), or a deliberate scope exclusion.
 
-Coverage snapshot generated 2026-10-06 from the `can_run` gating logic
+Coverage snapshot generated 2026-10-09 from the `can_run` gating logic
 (`cargo run --example coverage` reproduces it; the helper is not checked in).
 Thirteen scenarios × three protocols = 39 cells.
 
@@ -31,8 +31,6 @@ mode this suite exists to catch.
 | --- | --- | --- |
 | `early_hints` over H1 | Go (httptrace) | H1 103 has no other observer. |
 | `early_hints` over H2 | Go (httptrace) | First verified 2026-10; hyper-h2 also observes 103 but the scenario is not wired to run it there yet. |
-| `early_hints` over H3 | quic-go | The scenario that exposed the aioquic 1xx limitation; aioquic and curl-http3 cannot run it. |
-| `expect_continue` over H3 | quic-go | Same aioquic/curl limitation as above. |
 | `abort_midstream`, `idle_reuse` over H1 | curl | One request per invocation; connection reuse is not really exercised. |
 
 ## 3. Behaviors with no scenario at all
@@ -111,6 +109,12 @@ mode this suite exists to catch.
 - **Malformed traffic through a container.** Only `big_header_rejected`
   exists. Invalid HPACK/QPACK, bad pseudo-headers, and oversized frames over
   the wire are covered in-repo and by h2spec/h3spec, never by matrix clients.
+  Over HTTP/3 the refusal is connection-scoped: the oversized section fails
+  QPACK decoding against the server's field-section budget, so the server
+  closes the connection with `QPACK_DECOMPRESSION_FAILED` (0x200). Every H3
+  client therefore observes a transport failure (reset stream, empty stream,
+  or closed connection) rather than a 4xx status; all three verify as a
+  conforming refusal.
 - **IPv6.** Everything binds and dials IPv4 loopback. Dual-stack and
   IPv6-only paths are untested.
 - **Proxies.** The server has no proxy support; nothing to cover.

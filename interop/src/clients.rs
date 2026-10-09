@@ -304,8 +304,83 @@ pub static NODE: ClientSpec = ClientSpec {
     build_context: Some("docker/node"),
 };
 
+/// quiche over HTTP/3: Cloudflare's QUIC stack behind its edge and cloudflared.
+///
+/// Its QPACK encoder and congestion control differ meaningfully from quic-go,
+/// aioquic, and quinn, so it is a second full-matrix H3 opinion alongside
+/// quic-go. One quiche-specific detail lives in the driver rather than here:
+/// quiche sends HEADERS atomically, and a fresh connection's congestion window
+/// cannot fit the 32 KiB `big_header_rejected` block, so the driver primes the
+/// window with a sacrificial upload on the same connection first. The scenario
+/// still asserts exactly the refusal it should.
+pub static QUICHE: ClientSpec = ClientSpec {
+    id: "quiche",
+    name: "quiche (HTTP/3)",
+    protocols: &[Protocol::Http3],
+    capabilities: &[
+        Capability::Upload,
+        Capability::ResponseTrailers,
+        Capability::RequestTrailers,
+        Capability::Concurrency,
+        Capability::Abort,
+        Capability::ExpectContinue,
+        Capability::EarlyHints,
+        Capability::BigHeader,
+        Capability::LongUri,
+        Capability::ManyHeaders,
+        Capability::IdleReuse,
+    ],
+    image: Some(ImageSpec::Build {
+        tag: "zincio-http-interop-quiche",
+        context: "quiche",
+        target: "driver",
+    }),
+    entrypoint: Some(Entrypoint {
+        program: "/usr/local/bin/interop-driver",
+        args: &[],
+    }),
+    build_context: Some("docker/quiche"),
+};
+
+/// neqo over HTTP/3: Mozilla's QUIC stack used in Firefox.
+///
+/// Its client is the stable, production-hardened side (the server exists only
+/// to test the client), which is exactly the opinion this matrix wants. Notably
+/// absent: both trailer directions. neqo's client API has no way to send
+/// request trailers, and its source is explicit that received response
+/// trailers are ignored (`TODO implement trailers, for now just ignore them`
+/// in `recv_message.rs`), so claiming either would turn a tooling limitation
+/// into a phantom server bug. The `trailers` scenario therefore stays covered
+/// by aioquic, quic-go, and quiche.
+pub static NEQO: ClientSpec = ClientSpec {
+    id: "neqo",
+    name: "neqo (HTTP/3)",
+    protocols: &[Protocol::Http3],
+    capabilities: &[
+        Capability::Upload,
+        Capability::Concurrency,
+        Capability::Abort,
+        Capability::ExpectContinue,
+        Capability::EarlyHints,
+        Capability::BigHeader,
+        Capability::LongUri,
+        Capability::ManyHeaders,
+        Capability::IdleReuse,
+    ],
+    image: Some(ImageSpec::Build {
+        tag: "zincio-http-interop-neqo",
+        context: "neqo",
+        target: "driver",
+    }),
+    entrypoint: Some(Entrypoint {
+        program: "/usr/local/bin/interop-driver",
+        args: &[],
+    }),
+    build_context: Some("docker/neqo"),
+};
+
 /// Every client currently in the matrix.
-pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO, &PYTHON_H2, &QUIC_GO, &OKHTTP, &NODE];
+pub static ALL_CLIENTS: &[&ClientSpec] = &[&CURL, &AIOQUIC, &CURL_HTTP3, &GO, &PYTHON_H2, &QUIC_GO, &OKHTTP, &NODE, &QUICHE, &NEQO];
 
 /// The clients to run, honouring `ZINCIO_INTEROP_CLIENTS`.
 ///

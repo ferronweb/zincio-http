@@ -11,7 +11,7 @@ edition = "2021"
 
 [dependencies]
 http = "=1.5.0"
-neqo-common = { git = "https://github.com/mozilla/neqo", rev = "cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c" }
+neqo-common = { git = "https://github.com/mozilla/neqo", rev = "e302b43503f44e09f4257573dd320621516d1560" }
 neqo-http3 = { git = "https://github.com/mozilla/neqo", rev = "cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c" }
 neqo-transport = { git = "https://github.com/mozilla/neqo", rev = "cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c" }
 nss = { package = "nss-rs", git = "https://github.com/mozilla/nss-rs" }

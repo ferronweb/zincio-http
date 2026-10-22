@@ -21,7 +21,7 @@ kanal = "0.1.1"
 oneshot = { version = "0.2.1", features = ["async", "std"] }
 pin-project-lite = { version = "0.2.16", optional = true }
 send_wrapper = "0.6.0"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 tokio = { version = "1.50.0", features = ["sync", "parking_lot"] }
 zincio = { version = "0.2.22", default-features = false, features = ["time"] }
 

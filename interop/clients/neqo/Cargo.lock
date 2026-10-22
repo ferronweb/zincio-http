@@ -339,9 +339,9 @@ name = "interop-driver-neqo"
 version = "0.0.0"
 dependencies = [
  "http",
- "neqo-common",
+ "neqo-common 0.32.0",
  "neqo-http3",
- "neqo-transport",
+ "neqo-transport 0.32.0",
  "nss-rs",
  "sha2",
 ]
@@ -416,6 +416,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mtu"
+version = "0.4.1"
+source = "git+https://github.com/mozilla/neqo?rev=e302b43503f44e09f4257573dd320621516d1560#e302b43503f44e09f4257573dd320621516d1560"
+dependencies = [
+ "cfg_aliases",
+ "libc",
+ "static_assertions",
+ "windows",
+]
+
+[[package]]
 name = "neqo-common"
 version = "0.32.0"
 source = "git+https://github.com/mozilla/neqo?rev=cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c#cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c"
@@ -434,16 +445,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "neqo-common"
+version = "0.34.0"
+source = "git+https://github.com/mozilla/neqo?rev=e302b43503f44e09f4257573dd320621516d1560#e302b43503f44e09f4257573dd320621516d1560"
+dependencies = [
+ "enum-map",
+ "env_logger",
+ "libc",
+ "log",
+ "mach2",
+ "qlog",
+ "serde",
+ "static_assertions",
+ "strum",
+ "thiserror",
+ "windows",
+]
+
+[[package]]
 name = "neqo-http3"
-version = "0.32.0"
-source = "git+https://github.com/mozilla/neqo?rev=cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c#cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c"
+version = "0.34.0"
+source = "git+https://github.com/mozilla/neqo?rev=e302b43503f44e09f4257573dd320621516d1560#e302b43503f44e09f4257573dd320621516d1560"
 dependencies = [
  "enumset",
  "http",
  "log",
- "neqo-common",
+ "neqo-common 0.34.0",
  "neqo-qpack",
- "neqo-transport",
+ "neqo-transport 0.34.0",
  "nss-rs",
  "qlog",
  "rustc-hash",
@@ -455,12 +484,12 @@ dependencies = [
 
 [[package]]
 name = "neqo-qpack"
-version = "0.32.0"
-source = "git+https://github.com/mozilla/neqo?rev=cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c#cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c"
+version = "0.34.0"
+source = "git+https://github.com/mozilla/neqo?rev=e302b43503f44e09f4257573dd320621516d1560#e302b43503f44e09f4257573dd320621516d1560"
 dependencies = [
  "log",
- "neqo-common",
- "neqo-transport",
+ "neqo-common 0.34.0",
+ "neqo-transport 0.34.0",
  "rustc-hash",
  "static_assertions",
  "thiserror",
@@ -475,8 +504,30 @@ dependencies = [
  "enumset",
  "indexmap",
  "log",
- "mtu",
- "neqo-common",
+ "mtu 0.4.1 (git+https://github.com/mozilla/neqo?rev=cce5f8f4e8c94d7de54ebf8cb26e3015c8e39f6c)",
+ "neqo-common 0.32.0",
+ "nss-rs",
+ "qlog",
+ "rustc-hash",
+ "serde",
+ "serde_with",
+ "smallvec",
+ "static_assertions",
+ "strum",
+ "thiserror",
+]
+
+[[package]]
+name = "neqo-transport"
+version = "0.34.0"
+source = "git+https://github.com/mozilla/neqo?rev=e302b43503f44e09f4257573dd320621516d1560#e302b43503f44e09f4257573dd320621516d1560"
+dependencies = [
+ "enum-map",
+ "enumset",
+ "indexmap",
+ "log",
+ "mtu 0.4.1 (git+https://github.com/mozilla/neqo?rev=e302b43503f44e09f4257573dd320621516d1560)",
+ "neqo-common 0.34.0",
  "nss-rs",
  "qlog",
  "rustc-hash",

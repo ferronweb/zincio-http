@@ -326,7 +326,8 @@ impl Decoder {
                 break;
             }
             let instr = &self.decoder_stream_pending[consumed..consumed + len];
-            let mut off = 0;
+            // Past the header octet, which `decode` takes as `header`.
+            let mut off = 1;
             let header = instr[0];
             if header & 0x80 != 0 {
                 // `1` + 7-bit stream ID: Section Acknowledgment (4.4.1).

@@ -1567,3 +1567,150 @@ async fn fixture_client_pending_accept_reset_budget_closes_with_excessive_load()
     .await
     .expect("fixture_client_pending_accept_reset_budget_closes_with_excessive_load timed out");
 }
+
+/// A body that yields its frames in turn; the last may be an error.
+struct Frames(std::collections::VecDeque<Result<http_body::Frame<Bytes>, std::io::Error>>);
+
+impl http_body::Body for Frames {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, std::io::Error>>> {
+        std::task::Poll::Ready(self.get_mut().0.pop_front())
+    }
+}
+
+/// Reads a request stream to its end: the reset code, or `None` when it finished.
+async fn reset_code(mut recv: quinn::RecvStream) -> Option<u64> {
+    let mut buf = [0u8; 4096];
+    loop {
+        match recv.read(&mut buf).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return None,
+            Err(quinn::ReadError::Reset(code)) => return Some(code.into_inner()),
+            Err(other) => panic!("unexpected read error: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_response_cut_short_is_reset_not_finished() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new(),
+            cancel.clone(),
+            |request| async move {
+                let frames = match request.uri().path() {
+                    "/fail" => return Err(std::io::Error::other("the handler failed")),
+                    "/broken" => vec![
+                        Ok(http_body::Frame::data(Bytes::from_static(b"part"))),
+                        Err(std::io::Error::other("the body broke")),
+                    ],
+                    _ => vec![Ok(http_body::Frame::data(Bytes::from_static(b"whole")))],
+                };
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Frames(frames.into()))
+                    .expect("response"))
+            },
+        );
+
+        let mut fixture = Fixture::new(client_conn).await;
+        // A handler that fails, and a body that fails halfway (an upstream
+        // that went away mid-download), are cut short: the client must see a
+        // reset, not a finished stream it would take for the whole response.
+        for path in ["/fail", "/broken"] {
+            let (mut send, recv) = fixture
+                .request_open(&pseudo(&[
+                    (":method", "GET"),
+                    (":scheme", "https"),
+                    (":authority", "localhost"),
+                    (":path", path),
+                ]))
+                .await;
+            send.finish().expect("finish request");
+            assert_eq!(
+                reset_code(recv).await,
+                Some(0x0102),
+                "{path}: H3_INTERNAL_ERROR expected"
+            );
+        }
+
+        let (mut send, recv) = fixture
+            .request_open(&pseudo(&[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":authority", "localhost"),
+                (":path", "/ok"),
+            ]))
+            .await;
+        send.finish().expect("finish request");
+        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
+        assert_eq!(data, b"whole");
+
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        assert!(result.is_ok(), "server handle: {result:?}");
+        server_thread.join().expect("join server");
+    })
+    .await
+    .expect("fixture_client_response_cut_short_is_reset_not_finished timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_uppercase_field_name_is_malformed() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new(),
+            cancel.clone(),
+            |_request| async move {
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from_static(b"served")))
+                        .expect("response"),
+                )
+            },
+        );
+
+        let mut fixture = Fixture::new(client_conn).await;
+        // An uppercase field name makes the message malformed (RFC 9114
+        // Section 4.2); `HeaderName` would accept and lowercase it.
+        let (mut send, recv) = fixture
+            .request_open(&pseudo(&[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":authority", "localhost"),
+                (":path", "/"),
+                ("X-Upper", "1"),
+            ]))
+            .await;
+        let _ = send.finish();
+        assert_eq!(
+            reset_code(recv).await,
+            Some(0x010e),
+            "H3_MESSAGE_ERROR expected"
+        );
+
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        assert!(result.is_ok(), "server handle: {result:?}");
+        server_thread.join().expect("join server");
+    })
+    .await
+    .expect("fixture_client_uppercase_field_name_is_malformed timed out");
+}

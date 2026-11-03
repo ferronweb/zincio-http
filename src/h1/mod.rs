@@ -96,7 +96,32 @@ where
     /// implements [`zincio::io::AsInnerRawHandle`].
     #[inline]
     pub fn zerocopy(self) -> Http1Zerocopy<Io> {
-        Http1Zerocopy { inner: self }
+        Http1Zerocopy {
+            inner: self,
+            sender: Sendfile,
+        }
+    }
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    feature = "h1-zerocopy"
+))]
+impl<Io> Http1<Io>
+where
+    Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + ZerocopyWrite + Unpin + 'static,
+{
+    /// Converts this `Http1` into an [`Http1Zerocopy`] that has the stream
+    /// send zero-copy response bodies itself ([`ZerocopyWrite`]), for streams
+    /// that need more than a plain sendfile, such as kernel TLS.
+    ///
+    /// Responses without a zero-copy hint are sent normally.
+    #[inline]
+    pub fn zerocopy_by_io(self) -> Http1Zerocopy<Io, ByIo> {
+        Http1Zerocopy {
+            inner: self,
+            sender: ByIo,
+        }
     }
 }
 
@@ -291,13 +316,12 @@ where
         EResB,
         EResBE,
         EResE,
-        ZF,
-        ZFut,
+        Z,
     >(
         mut self,
         request_fn: F,
         error_fn: EF,
-        mut zerocopy_fn: Option<ZF>,
+        mut zerocopy: Z,
     ) -> Result<(), std::io::Error>
     where
         F: Fn(Request<Incoming>) -> Fut + 'static,
@@ -310,91 +334,79 @@ where
         EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin + 'static,
         EResE: std::error::Error + 'static,
         EResBE: std::error::Error + 'static,
-        ZF: FnMut(RawHandle, &'static Io, u64) -> ZFut,
-        ZFut: std::future::Future<Output = Result<(), std::io::Error>>,
+        Z: ZerocopySend<Io>,
     {
         let mut keep_alive = true;
 
         while keep_alive {
-            let (mut request, body_tx, send_continue_body) =
-                match if let Some(timeout) = self.options.header_read_timeout {
-                    zincio::time::timeout(timeout, async {
-                        if let Some(token) = self.cancel_token.clone() {
-                            token.run_until_cancelled(self.read_request()).await
-                        } else {
-                            Some(self.read_request().await)
-                        }
-                    })
-                    .await
-                } else {
-                    Ok(Some(self.read_request().await))
-                } {
-                    Ok(Some(Ok(Some(d)))) => d,
-                    Ok(Some(Ok(None))) => {
-                        return Ok(());
+            let (mut request, body_tx, send_continue_body) = match if let Some(timeout) =
+                self.options.header_read_timeout
+            {
+                zincio::time::timeout(timeout, async {
+                    if let Some(token) = self.cancel_token.clone() {
+                        token.run_until_cancelled(self.read_request()).await
+                    } else {
+                        Some(self.read_request().await)
                     }
-                    Ok(Some(Err(e)))
-                        if self.connection_idle
-                            && matches!(
-                                e.kind(),
-                                std::io::ErrorKind::BrokenPipe
-                                    | std::io::ErrorKind::ConnectionReset
-                                    | std::io::ErrorKind::ConnectionAborted
-                                    | std::io::ErrorKind::UnexpectedEof
-                            ) =>
-                    {
-                        // HTTP/1.x abruptly closed when idle
-                        return Ok(());
-                    }
-                    Ok(Some(Err(e))) => {
-                        if let Ok(mut response) = error_fn(false).await {
-                            response
-                                .headers_mut()
-                                .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                })
+                .await
+            } else {
+                Ok(Some(self.read_request().await))
+            } {
+                Ok(Some(Ok(Some(d)))) => d,
+                Ok(Some(Ok(None))) => {
+                    return Ok(());
+                }
+                Ok(Some(Err(e)))
+                    if self.connection_idle
+                        && matches!(
+                            e.kind(),
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::UnexpectedEof
+                        ) =>
+                {
+                    // HTTP/1.x abruptly closed when idle
+                    return Ok(());
+                }
+                Ok(Some(Err(e))) => {
+                    if let Ok(mut response) = error_fn(false).await {
+                        response
+                            .headers_mut()
+                            .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
-                            let _ = self
-                                .write_response(
-                                    response,
-                                    Version::HTTP_11,
-                                    false,
-                                    false,
-                                    zerocopy_fn.as_mut(),
-                                )
-                                .await;
-                        }
-                        return Err(e);
+                        let _ = self
+                            .write_response(response, Version::HTTP_11, false, false, &mut zerocopy)
+                            .await;
                     }
-                    Ok(None) => {
-                        // Graceful shutdown
-                        return Ok(());
-                    }
-                    Err(_) if self.connection_idle => {
-                        // Idle connection
-                        return Ok(());
-                    }
-                    Err(_) => {
-                        // Timeout error
-                        if let Ok(mut response) = error_fn(true).await {
-                            response
-                                .headers_mut()
-                                .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                    return Err(e);
+                }
+                Ok(None) => {
+                    // Graceful shutdown
+                    return Ok(());
+                }
+                Err(_) if self.connection_idle => {
+                    // Idle connection
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Timeout error
+                    if let Ok(mut response) = error_fn(true).await {
+                        response
+                            .headers_mut()
+                            .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
-                            let _ = self
-                                .write_response(
-                                    response,
-                                    Version::HTTP_11,
-                                    false,
-                                    false,
-                                    zerocopy_fn.as_mut(),
-                                )
-                                .await;
-                        }
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "header read timeout",
-                        ));
+                        let _ = self
+                            .write_response(response, Version::HTTP_11, false, false, &mut zerocopy)
+                            .await;
                     }
-                };
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "header read timeout",
+                    ));
+                }
+            };
 
             // Connection header detection
             let connection_header_split = request
@@ -567,14 +579,8 @@ where
                     .insert(header::CONNECTION, HeaderValue::from_static("close"));
             }
 
-            self.write_response(
-                response,
-                version,
-                write_trailers,
-                is_head,
-                zerocopy_fn.as_mut(),
-            )
-            .await?;
+            self.write_response(response, version, write_trailers, is_head, &mut zerocopy)
+                .await?;
 
             if was_upgraded {
                 // HTTP upgrade
@@ -623,22 +629,7 @@ where
         EResE: std::error::Error + 'static,
         EResBE: std::error::Error + 'static,
     {
-        #[allow(clippy::type_complexity)]
-        let no_zerocopy: Option<
-            Box<
-                dyn FnMut(
-                    RawHandle,
-                    &Io,
-                    u64,
-                ) -> Box<
-                    dyn std::future::Future<Output = Result<(), std::io::Error>>
-                        + Unpin
-                        + Send
-                        + Sync,
-                >,
-            >,
-        > = None;
-        self.handle_with_error_fn_and_zerocopy(request_fn, error_fn, no_zerocopy)
+        self.handle_with_error_fn_and_zerocopy(request_fn, error_fn, NoZerocopy)
     }
 
     #[inline]

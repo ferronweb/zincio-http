@@ -1042,3 +1042,221 @@ async fn test_100_continue_no_duplicate() {
         })
         .await
 }
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    feature = "h1-zerocopy"
+))]
+mod zerocopy {
+    use std::cell::Cell;
+    use std::io::{Seek, Write};
+    use std::os::fd::BorrowedFd;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::task::{Context, Poll};
+
+    use http_body_util::Full;
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
+
+    use zincio_http::{install_zerocopy_fd, Http1, Http1Options, HttpProtocol, ZerocopyWrite};
+
+    /// A stream that sends zero-copy bodies itself, by reading the descriptor, and
+    /// counts what it sent that way.
+    struct SelfSending {
+        io: DuplexStream,
+        sent: Rc<Cell<u64>>,
+    }
+
+    impl AsyncRead for SelfSending {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.io).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for SelfSending {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.io).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.io).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.io).poll_shutdown(cx)
+        }
+    }
+
+    impl ZerocopyWrite for SelfSending {
+        async fn send_zerocopy(&mut self, from: BorrowedFd<'_>, len: u64) -> std::io::Result<()> {
+            let mut file = std::fs::File::from(from.try_clone_to_owned()?);
+            let mut bytes = vec![0; usize::try_from(len).unwrap()];
+            std::io::Read::read_exact(&mut file, &mut bytes)?;
+            self.io.write_all(&bytes).await?;
+            self.sent.set(self.sent.get() + len);
+            Ok(())
+        }
+    }
+
+    fn file_with(bytes: &[u8]) -> std::fs::File {
+        let mut file = tempfile();
+        file.write_all(bytes).unwrap();
+        file.rewind().unwrap();
+        file
+    }
+
+    fn tempfile() -> std::fs::File {
+        let path = std::env::temp_dir().join(format!(
+            "zincio-http-zerocopy-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        file
+    }
+
+    /// A response from a file the response owns, sent by the stream itself, then an
+    /// ordinary response on the same connection.
+    #[tokio::test]
+    async fn the_stream_sends_an_owned_descriptor_then_the_connection_goes_on() {
+        tokio::task::LocalSet::new()
+            .run_until(async move {
+                let (client_io, server_io) = tokio::io::duplex(1 << 16);
+                let sent = Rc::new(Cell::new(0));
+                let io = SelfSending {
+                    io: server_io,
+                    sent: Rc::clone(&sent),
+                };
+                let server = Http1::new(io, Http1Options::new().header_read_timeout(None))
+                    .zerocopy_by_io();
+                let server_task = tokio::task::spawn_local(server.handle(|req| async move {
+                    let mut response = if req.uri().path() == "/file" {
+                        http::Response::builder()
+                            .header(http::header::CONTENT_LENGTH, "11")
+                            .body(Full::new(bytes::Bytes::new()))
+                            .unwrap()
+                    } else {
+                        http::Response::builder()
+                            .body(Full::new(bytes::Bytes::from_static(b"plain")))
+                            .unwrap()
+                    };
+                    if req.uri().path() == "/file" {
+                        install_zerocopy_fd(&mut response, file_with(b"from a file"));
+                    }
+                    Ok::<_, http::Error>(response)
+                }));
+                let (mut reader, mut writer) = tokio::io::split(client_io);
+                writer
+                    .write_all(b"GET /file HTTP/1.1\r\nHost: a\r\n\r\nGET /plain HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                let mut response = Vec::new();
+                reader.read_to_end(&mut response).await.unwrap();
+                let text = String::from_utf8(response).unwrap();
+                let first = text.find("\r\n\r\nfrom a file").expect("the file's bytes follow its head");
+                assert!(text[first..].contains("HTTP/1.1 200 OK"), "{text}");
+                assert!(text.ends_with("\r\n\r\nplain"), "{text}");
+                assert_eq!(sent.get(), 11, "the stream sent the file itself");
+                server_task.await.unwrap().unwrap();
+            })
+            .await
+    }
+
+    /// zincio's emulated sendfile, on a real socket: the file's bytes after the head.
+    #[test]
+    fn sendfile_sends_an_owned_descriptor_on_a_socket() {
+        let runtime = zincio::RuntimeBuilder::new()
+            .enable_timer(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = zincio::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let body: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+            let client_body = body.clone();
+            let client = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let mut socket = std::net::TcpStream::connect(addr).unwrap();
+                socket
+                    .write_all(b"GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+                let mut response = Vec::new();
+                socket.read_to_end(&mut response).unwrap();
+                let head_end = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+                assert!(
+                    response[head_end..] == client_body[..],
+                    "the file came whole"
+                );
+            });
+            let (stream, _) = listener.accept().await.unwrap();
+            let server = Http1::new(
+                stream.into_poll().unwrap(),
+                Http1Options::new().header_read_timeout(None),
+            )
+            .zerocopy();
+            let length = body.len().to_string();
+            server
+                .handle(move |_req| {
+                    let file = file_with(&body);
+                    let length = length.clone();
+                    async move {
+                        let mut response = http::Response::builder()
+                            .header(http::header::CONTENT_LENGTH, length)
+                            .body(Full::new(bytes::Bytes::new()))
+                            .unwrap();
+                        install_zerocopy_fd(&mut response, file);
+                        Ok::<_, http::Error>(response)
+                    }
+                })
+                .await
+                .unwrap();
+            client.join().unwrap();
+        });
+    }
+
+    /// A plain `Http1` sends a hinted response's own body.
+    #[tokio::test]
+    async fn without_zerocopy_the_body_is_sent() {
+        tokio::task::LocalSet::new()
+            .run_until(async move {
+                let (client_io, server_io) = tokio::io::duplex(4096);
+                let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
+                let server_task = tokio::task::spawn_local(server.handle(|_req| async {
+                    let mut response = http::Response::builder()
+                        .body(Full::new(bytes::Bytes::from_static(b"from the body")))
+                        .unwrap();
+                    install_zerocopy_fd(&mut response, file_with(b"from a file!!"));
+                    Ok::<_, http::Error>(response)
+                }));
+                let (mut reader, mut writer) = tokio::io::split(client_io);
+                writer
+                    .write_all(b"GET / HTTP/1.0\r\nHost: a\r\n\r\n")
+                    .await
+                    .unwrap();
+                let mut response = Vec::new();
+                reader.read_to_end(&mut response).await.unwrap();
+                assert!(response.ends_with(b"\r\n\r\nfrom the body"));
+                server_task.await.unwrap().unwrap();
+            })
+            .await
+    }
+}

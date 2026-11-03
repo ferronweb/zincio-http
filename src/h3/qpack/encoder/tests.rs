@@ -466,3 +466,29 @@ fn insert_with_literal_name_huffman_flag_at_bit_five() {
         "Huffman flag must be at bit 5 for an Insert With Literal Name"
     );
 }
+
+/// Decoder-stream integers past their prefix (RFC 9204 Section 4.1.1): an
+/// Insert Count Increment of 70 and a Section Acknowledgment for stream 200
+/// take two octets each. Reading the first octet twice made the increment
+/// 126, more than was inserted, and the instruction a decoder stream error.
+#[test]
+fn decoder_stream_integers_past_the_prefix_are_read_whole() {
+    let mut enc = Encoder::new(4096, false);
+    let _ = enc.set_capacity(4096);
+    let fields: Vec<_> = (0..70).map(|i| hdr(&format!("x-field-{i}"), "v")).collect();
+    let _ = enc.encode_section(200, &fields);
+    assert!(enc.dynamic.inserted() >= 70, "{}", enc.dynamic.inserted());
+    let had_refs = enc.pending_refs.iter().any(|(id, _)| *id == 200);
+    let mut instructions = Vec::new();
+    integer::encode(&mut instructions, 200, 7, 0x80);
+    integer::encode(&mut instructions, 70, 6, 0x00);
+    assert_eq!(hex(&instructions), "ff493f07");
+    enc.feed_decoder_stream(&instructions).unwrap();
+    assert_eq!(enc.known_received, 70);
+    if had_refs {
+        assert!(
+            enc.pending_refs.iter().all(|(id, _)| *id != 200),
+            "the acknowledgment freed nothing"
+        );
+    }
+}

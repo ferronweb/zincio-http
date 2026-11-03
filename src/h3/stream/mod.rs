@@ -64,6 +64,9 @@ pub(crate) enum StreamError {
     Transport(TransportError),
     /// A malformed frame or payload (`H3_FRAME_ERROR`).
     Frame,
+    /// A frame longer than this endpoint buffers (`H3_EXCESSIVE_LOAD`;
+    /// RFC 9114 Section 7.1).
+    ExcessiveLoad,
     /// An invalid message: malformed, duplicated or missing pseudo-headers,
     /// a field section that violates RFC 9114 Section 4.1, or trailers
     /// with pseudo-headers (`H3_MESSAGE_ERROR`).
@@ -89,6 +92,7 @@ impl StreamError {
             StreamError::Transport(TransportError::Closed { code }) => *code,
             StreamError::Transport(_) => H3Error::Internal.code(),
             StreamError::Frame => H3Error::FrameError.code(),
+            StreamError::ExcessiveLoad => H3Error::ExcessiveLoad.code(),
             StreamError::Message => H3Error::Message.code(),
             StreamError::FrameUnexpected => H3Error::FrameUnexpected.code(),
             StreamError::Qpack(err) => u64::from(err.code()),
@@ -128,6 +132,7 @@ fn map_frame_error(err: FrameError) -> StreamError {
     match err {
         // A malformed frame payload anywhere is H3_FRAME_ERROR.
         FrameError::Frame => StreamError::Frame,
+        FrameError::ExcessiveLoad => StreamError::ExcessiveLoad,
         // Any control-plane frame on a request stream is
         // H3_FRAME_UNEXPECTED (RFC 9114 Sections 7.2.3-7.2.7).
         FrameError::Unexpected(_) | FrameError::Settings => StreamError::FrameUnexpected,
@@ -164,6 +169,9 @@ pub(crate) struct SharedCodecs {
     /// The peer's `SETTINGS_MAX_FIELD_SECTION_SIZE` once its SETTINGS
     /// frame arrived; `None` means unlimited.
     pub(crate) peer_max_field_section_size: Mutex<Option<u64>>,
+    /// This endpoint's advertised limit, which request streams' frame
+    /// decoders enforce before buffering.
+    pub(crate) local_max_field_section_size: Option<u64>,
     /// Wakers of request-stream tasks parked on blocked QPACK sections.
     /// Keyed by stream ID; the control plane wakes only the streams whose
     /// sections were unblocked.
@@ -197,6 +205,7 @@ impl SharedCodecs {
             encoder_stream: Mutex::new(VecDeque::new()),
             unblocked: Mutex::new(FxHashMap::default()),
             peer_max_field_section_size: Mutex::new(None),
+            local_max_field_section_size: local.max_field_section_size,
             waiters: Mutex::new(FxHashMap::default()),
             encoder_notify: Notify::new(),
         }
@@ -298,7 +307,9 @@ impl RequestStream {
         Self {
             stream,
             stream_id,
-            frame_decoder: FrameDecoder::new(),
+            frame_decoder: FrameDecoder::with_max_field_section(
+                shared.local_max_field_section_size,
+            ),
             shared,
             awaiting_headers: true,
             headers_blocked: false,
@@ -897,6 +908,9 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
             }
         } else {
             pseudo_done = true;
+            if connection_specific(&name, &value) {
+                return Err(StreamError::Message);
+            }
             regular.push((
                 HeaderName::from_bytes(&name).map_err(|_| StreamError::Message)?,
                 HeaderValue::from_maybe_shared(value).map_err(|_| StreamError::Message)?,
@@ -1001,6 +1015,22 @@ fn build_uri(
     }
 }
 
+/// A connection-specific field, which makes an HTTP/3 message malformed (RFC 9114
+/// Section 4.2): `TE` is allowed only as `trailers` (h3spec
+/// "MUST treat a request with connection as malformed" and its siblings.)
+#[inline]
+fn connection_specific(name: &[u8], value: &[u8]) -> bool {
+    const FIELDS: [&[u8]; 5] = [
+        b"connection",
+        b"keep-alive",
+        b"proxy-connection",
+        b"transfer-encoding",
+        b"upgrade",
+    ];
+    FIELDS.iter().any(|f| name.eq_ignore_ascii_case(f))
+        || (name.eq_ignore_ascii_case(b"te") && !value.eq_ignore_ascii_case(b"trailers"))
+}
+
 /// Converts a decoded header list into a `HeaderMap`; pseudo-headers are
 /// invalid in a trailer section (RFC 9114 Section 4.1).
 #[inline]
@@ -1009,7 +1039,7 @@ fn header_map(headers: Vec<(Bytes, Bytes)>) -> Result<HeaderMap, StreamError> {
     // on a section with more fields than the map can ever hold.
     let mut map = HeaderMap::try_with_capacity(headers.len()).unwrap_or_default();
     for (name, value) in headers {
-        if name.first() == Some(&b':') {
+        if name.first() == Some(&b':') || connection_specific(&name, &value) {
             return Err(StreamError::Message);
         }
         let name = HeaderName::from_bytes(&name).map_err(|_| StreamError::Message)?;

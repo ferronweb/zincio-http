@@ -79,6 +79,9 @@ pub(crate) enum ControlError {
     Frame,
     /// Reserved or duplicate setting identifiers (`H3_SETTINGS_ERROR`).
     Settings,
+    /// A frame longer than this endpoint buffers (`H3_EXCESSIVE_LOAD`;
+    /// RFC 9114 Section 7.1).
+    ExcessiveLoad,
     /// A CANCEL_PUSH for a never-promised push, or a reduced MAX_PUSH_ID
     /// (`H3_ID_ERROR`).
     Id,
@@ -99,6 +102,7 @@ impl ControlError {
             ControlError::FrameUnexpected => H3Error::FrameUnexpected.code(),
             ControlError::Frame => H3Error::FrameError.code(),
             ControlError::Settings => H3Error::Settings.code(),
+            ControlError::ExcessiveLoad => H3Error::ExcessiveLoad.code(),
             ControlError::Id => H3Error::Id.code(),
             ControlError::Qpack(err) => u64::from(err.code()),
         }
@@ -127,6 +131,7 @@ fn map_frame_error(err: FrameError) -> ControlError {
         FrameError::Frame => ControlError::Frame,
         FrameError::Unexpected(_) => ControlError::FrameUnexpected,
         FrameError::Settings => ControlError::Settings,
+        FrameError::ExcessiveLoad => ControlError::ExcessiveLoad,
     }
 }
 

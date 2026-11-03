@@ -5,6 +5,7 @@
 **Not yet released**
 
 - Fixed busy-looping while gracefully shutting down an HTTP/3 connection ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/39))
+- Fixed stalls for in-flight requests when gracefully shutting down an HTTP/2 connection.
 - The accept timeout no longer causes in-flight HTTP/3 requests/streams to be closed ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/41))
 
 ## `zincio-http` 0.4.14

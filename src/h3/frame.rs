@@ -301,6 +301,10 @@ pub enum FrameError {
     /// (0x02-0x05) or a duplicate identifier in one SETTINGS frame
     /// (RFC 9114 Section 7.2.4).
     Settings,
+    /// `H3_EXCESSIVE_LOAD` (0x0107): a frame longer than this endpoint is
+    /// willing to buffer (RFC 9114 Section 7.1), refused from its declared
+    /// length.
+    ExcessiveLoad,
 }
 
 impl FrameError {
@@ -311,6 +315,7 @@ impl FrameError {
             FrameError::Frame => H3Error::FrameError.code(),
             FrameError::Unexpected(_) => H3Error::FrameUnexpected.code(),
             FrameError::Settings => H3Error::Settings.code(),
+            FrameError::ExcessiveLoad => H3Error::ExcessiveLoad.code(),
         }
     }
 }
@@ -329,6 +334,10 @@ impl FrameError {
 pub struct FrameDecoder {
     bufs: VecDeque<Bytes>,
     len: usize,
+    /// The largest HEADERS or PUSH_PROMISE payload buffered: this endpoint's
+    /// `SETTINGS_MAX_FIELD_SECTION_SIZE` (an encoded field section is not
+    /// larger than the decoded one it counts). `None`: [`MAX_FRAME_PAYLOAD`].
+    max_field_section: Option<u64>,
 }
 
 impl FrameDecoder {
@@ -336,6 +345,16 @@ impl FrameDecoder {
     #[inline]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A decoder that refuses HEADERS and PUSH_PROMISE frames longer than
+    /// `max` before buffering them.
+    #[inline]
+    pub fn with_max_field_section(max: Option<u64>) -> Self {
+        Self {
+            max_field_section: max,
+            ..Self::default()
+        }
     }
 
     /// Appends received bytes to the input buffer.
@@ -381,6 +400,17 @@ impl FrameDecoder {
                 return Err(FrameError::Settings);
             }
             if len > MAX_FRAME_PAYLOAD {
+                return Err(FrameError::ExcessiveLoad);
+            }
+            if matches!(ty, FRAME_HEADERS | FRAME_PUSH_PROMISE)
+                && self.max_field_section.is_some_and(|max| len > max)
+            {
+                return Err(FrameError::ExcessiveLoad);
+            }
+            // CANCEL_PUSH, GOAWAY and MAX_PUSH_ID hold one varint, at most 8
+            // bytes: a longer payload cannot match (so it is not
+            // buffered first).
+            if matches!(ty, FRAME_CANCEL_PUSH | FRAME_GOAWAY | FRAME_MAX_PUSH_ID) && len > 8 {
                 return Err(FrameError::Frame);
             }
             let header_len = type_len + len_len;
@@ -558,6 +588,10 @@ fn parse_settings(payload: &[u8]) -> Result<Settings, FrameError> {
     // settings index (previously a linear scan per entry, i.e. O(n^2)
     // in the entry count), so the overall parse is O(n).
     let mut count: usize = 0;
+    // Grease identifiers are not kept, but a repeated one is still a
+    // duplicate (RFC 9114 Section 7.2.4.1; h3spec "treats a
+    // repeated setting identifier as an error whatever its value").
+    let mut grease = Vec::new();
     while !rest.is_empty() {
         let Some((id, id_len)) = parse_varint(rest)? else {
             return Err(FrameError::Frame);
@@ -574,10 +608,12 @@ fn parse_settings(payload: &[u8]) -> Result<Settings, FrameError> {
         if is_reserved_setting(id) {
             return Err(FrameError::Settings);
         }
-        if settings.get(id).is_some() {
+        if settings.get(id).is_some() || grease.contains(&id) {
             return Err(FrameError::Settings);
         }
-        if !is_grease(id) {
+        if is_grease(id) {
+            grease.push(id);
+        } else {
             settings.insert(id, value);
         }
     }
@@ -786,7 +822,7 @@ mod tests {
         decoder.extend(Bytes::from_static(&[
             0x01, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
         ]));
-        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Frame);
+        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::ExcessiveLoad);
         assert_eq!(decoder.buffered(), 10);
     }
 
@@ -972,13 +1008,67 @@ mod tests {
     #[test]
     fn oversized_frames_rejected_from_header() {
         // Any frame declaring beyond MAX_FRAME_PAYLOAD is rejected
-        // immediately (H3_FRAME_ERROR) instead of buffering unboundedly.
+        // immediately (H3_EXCESSIVE_LOAD) instead of buffering unboundedly.
         let mut wire = BytesMut::new();
         write_varint(FRAME_DATA, &mut wire);
         write_varint(MAX_FRAME_PAYLOAD + 1, &mut wire);
         let mut decoder = FrameDecoder::new();
         decoder.extend(wire.freeze());
-        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Frame);
+        let err = decoder.next_frame().unwrap_err();
+        assert_eq!(err, FrameError::ExcessiveLoad);
+        assert_eq!(err.h3_code(), 0x0107);
+    }
+
+    #[test]
+    fn a_one_gib_goaway_is_refused_from_its_header() {
+        // h3spec's "MUST NOT buffer a frame longer than ..." case.
+        let mut decoder = FrameDecoder::new();
+        decoder.extend(Bytes::from_static(&[
+            0x07, 0xc0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
+        ]));
+        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::ExcessiveLoad);
+    }
+
+    #[test]
+    fn varint_frames_longer_than_a_varint_are_refused_unbuffered() {
+        for ty in [FRAME_CANCEL_PUSH, FRAME_GOAWAY, FRAME_MAX_PUSH_ID] {
+            let mut wire = BytesMut::new();
+            write_varint(ty, &mut wire);
+            write_varint(9, &mut wire);
+            let header_len = wire.len();
+            let mut decoder = FrameDecoder::new();
+            decoder.extend(wire.freeze());
+            assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Frame);
+            assert_eq!(decoder.buffered(), header_len);
+        }
+    }
+
+    #[test]
+    fn headers_over_the_field_section_limit_are_refused_unbuffered() {
+        let mut wire = BytesMut::new();
+        write_varint(FRAME_HEADERS, &mut wire);
+        write_varint(65_537, &mut wire);
+        let mut decoder = FrameDecoder::with_max_field_section(Some(65_536));
+        decoder.extend(wire.freeze());
+        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::ExcessiveLoad);
+        // At the limit it waits for the payload.
+        let mut wire = BytesMut::new();
+        write_varint(FRAME_HEADERS, &mut wire);
+        write_varint(65_536, &mut wire);
+        let mut decoder = FrameDecoder::with_max_field_section(Some(65_536));
+        decoder.extend(wire.freeze());
+        assert_eq!(decoder.next_frame(), Ok(None));
+    }
+
+    #[test]
+    fn a_repeated_grease_setting_is_a_duplicate() {
+        // h3spec's "treats a repeated setting identifier as an error
+        // whatever its value": 0x40 (a grease value) twice.
+        let mut decoder = FrameDecoder::new();
+        decoder.extend(Bytes::from_static(&[
+            0x04, 0x06, 0x40, 0x40, 0x00, 0x40, 0x40, 0x00,
+        ]));
+        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Settings);
     }
 
     #[test]

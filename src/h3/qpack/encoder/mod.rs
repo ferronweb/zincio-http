@@ -636,7 +636,9 @@ impl Encoder {
                 break;
             }
             let instr = &data[consumed..consumed + len];
-            let mut off = 0;
+            // `decode` takes the first octet as `header`; its continuation
+            // octets follow it.
+            let mut off = 1;
             if header & 0x80 != 0 {
                 // `1` + 7-bit stream ID: Section Acknowledgment (4.4.1).
                 // A matching field section is freed; a stray

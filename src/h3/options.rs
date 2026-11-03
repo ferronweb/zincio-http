@@ -166,12 +166,13 @@ impl Http3Options {
         self
     }
 
-    /// Sets the maximum number of streams the peer opened and then
-    /// terminated (RESET_STREAM or STOP_SENDING) before this endpoint
-    /// accepted them (RFC 9114 Section 10.5): a peer that churns through
-    /// streams without dispatching a single request exceeds this budget,
-    /// and the connection is closed with `H3_EXCESSIVE_LOAD`. `None`
-    /// disables the limit. Defaults to `Some(20)`.
+    /// Sets how many streams the peer may open and then terminate
+    /// (RESET_STREAM or STOP_SENDING) before this endpoint accepts them
+    /// (RFC 9114 Section 10.5). The budget refills at 50 streams a second,
+    /// so cancelled requests spread over a connection's life never use it
+    /// up; a peer that churns through streams faster exceeds it, and the
+    /// connection is closed with `H3_EXCESSIVE_LOAD`. `None` disables the
+    /// limit. Defaults to `Some(20)`.
     #[inline]
     pub fn max_pending_accept_reset_streams(mut self, max: Option<usize>) -> Self {
         self.max_pending_accept_reset_streams = max;

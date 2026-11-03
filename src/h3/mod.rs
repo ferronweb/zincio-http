@@ -60,6 +60,10 @@ use crate::{
 const H3_NO_ERROR: u64 = 0x0100;
 const H3_REQUEST_REJECTED: u64 = 0x010b;
 
+/// How fast the budget for streams reset before acceptance refills
+/// (`ConnResetState::note_pending_accept_reset`).
+const PENDING_ACCEPT_RESETS_PER_SECOND: f64 = 50.0;
+
 /// Per-connection budgets for the resets a hostile peer can force the
 /// server to send or observe (RFC 9114 Section 10.5); `None` disables a
 /// budget.
@@ -78,9 +82,12 @@ struct ConnResetState {
     /// errors (bounded by `limits.max_local_error_resets`).
     local_error_resets: usize,
     /// Streams the peer terminated (RESET_STREAM or STOP_SENDING) before
-    /// this endpoint accepted them (bounded by
+    /// this endpoint accepted them, as a bucket that drains at
+    /// [`PENDING_ACCEPT_RESETS_PER_SECOND`] (bounded by
     /// `limits.max_pending_accept_resets`).
-    pending_accept_resets: usize,
+    pending_accept_resets: f64,
+    /// When `pending_accept_resets` was last drained.
+    pending_accept_since: Instant,
     /// Application error code the connection must close with; the driver
     /// drains it on its next turn.
     close_code: Option<u64>,
@@ -102,15 +109,21 @@ impl ConnResetState {
 
     /// Records a peer-terminated, never-accepted stream; returns the code
     /// the connection must close with when the budget is exceeded.
+    ///
+    /// The budget refills over time: clients cancel requests in normal use,
+    /// and on a long-lived connection a lifetime count eventually closes it
+    /// for no fault. A peer churning through streams (Rapid Reset) still
+    /// exceeds it at once.
     #[inline]
-    fn note_pending_accept_reset(&mut self) -> Option<u64> {
-        match self.limits.max_pending_accept_resets {
-            Some(max) if self.pending_accept_resets >= max => Some(H3Error::ExcessiveLoad.code()),
-            _ => {
-                self.pending_accept_resets += 1;
-                None
-            }
-        }
+    fn note_pending_accept_reset(&mut self, now: Instant) -> Option<u64> {
+        let max = self.limits.max_pending_accept_resets?;
+        let elapsed = now.saturating_duration_since(self.pending_accept_since);
+        let drained = elapsed.as_secs_f64() * PENDING_ACCEPT_RESETS_PER_SECOND;
+        self.pending_accept_resets = (self.pending_accept_resets - drained).max(0.0) + 1.0;
+        self.pending_accept_since = now;
+        #[allow(clippy::cast_precision_loss)]
+        let over = self.pending_accept_resets > max as f64;
+        over.then(|| H3Error::ExcessiveLoad.code())
     }
 }
 
@@ -434,7 +447,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
             if err.is_stream_scoped() {
                 report(&stream_error_callback, stream_id, &err);
                 let mut state = conn_state.lock();
-                if let Some(code) = state.note_pending_accept_reset() {
+                if let Some(code) = state.note_pending_accept_reset(Instant::now()) {
                     state.close_code = Some(code);
                 }
                 return;
@@ -859,7 +872,8 @@ where
                         max_pending_accept_resets: options.max_pending_accept_reset_streams,
                     },
                     local_error_resets: 0,
-                    pending_accept_resets: 0,
+                    pending_accept_resets: 0.0,
+                    pending_accept_since: Instant::now(),
                     close_code: None,
                 }));
             let mut ongoing: FuturesUnordered<oneshot::AsyncReceiver<()>> = FuturesUnordered::new();

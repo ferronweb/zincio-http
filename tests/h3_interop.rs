@@ -1647,3 +1647,57 @@ async fn fixture_client_pending_accept_reset_budget_closes_with_excessive_load()
     .await
     .expect("fixture_client_pending_accept_reset_budget_closes_with_excessive_load timed out");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_pending_accept_resets_over_time_keep_the_connection() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new().max_pending_accept_reset_streams(Some(2)),
+            cancel.clone(),
+            |request| async move {
+                let (parts, _) = request.into_parts();
+                let payload = format!("still-open {}", parts.uri.path());
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from(payload)))
+                        .expect("response"),
+                )
+            },
+        );
+
+        let mut fixture = Fixture::new(client_conn.clone()).await;
+        // Ten cancelled streams over a second, as a client cancels requests
+        // over a connection's life: more than the budget of 2 in all, but
+        // never more than 2 at once, so the connection stays open.
+        for _ in 0..10 {
+            let (mut send, _recv) = fixture.conn.open_bi().await.expect("open request stream");
+            let _ = send.reset(0x010cu32.into()); // H3_REQUEST_CANCELLED
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let (mut send, recv) = fixture
+            .request_open(&pseudo(&[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":authority", "localhost"),
+                (":path", "/after"),
+            ]))
+            .await;
+        send.finish().expect("finish request");
+        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
+        assert_eq!(data, b"still-open /after");
+
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        assert!(result.is_ok(), "server handle: {result:?}");
+        server_thread.join().expect("join server");
+    })
+    .await
+    .expect("fixture_client_pending_accept_resets_over_time_keep_the_connection timed out");
+}

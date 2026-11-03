@@ -579,6 +579,7 @@ where
         if self.graceful || self.closing {
             return;
         }
+        self.shutdown = None;
         self.graceful = true;
         self.graceful_last_stream = self.highest_stream_id;
         self.writer.write_goaway(

@@ -5,7 +5,11 @@
 **Not yet released**
 
 - Fixed busy-looping while gracefully shutting down an HTTP/3 connection ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/39))
+- Fixed HTTP/3 response being truncated when an internal handler error occured ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/48))
+- Fixed QPACK decoder stream parsing for HTTP/3 reading wrong counts ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/47))
+- Fixed regular HTTP/3 requests erroring out with excessive load error due to pending-accept reset ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/45))
 - Fixed stalls for in-flight requests when gracefully shutting down an HTTP/2 connection.
+- Improved overall HTTP/3 specification compliance ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/46))
 - The accept timeout no longer causes in-flight HTTP/3 requests/streams to be closed ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/41))
 
 ## `zincio-http` 0.4.14

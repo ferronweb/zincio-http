@@ -383,6 +383,14 @@ async fn send_trailers(
         .map_err(h3_stream_error_to_io)
 }
 
+/// Ends a response that cannot be completed with `H3_INTERNAL_ERROR`, so
+/// the client sees it was cut short: dropping the stream finishes it, as if
+/// it were whole.
+async fn abort(stream: &SharedRequest) {
+    let mut guard = stream.lock().await;
+    let _ = std::future::poll_fn(|cx| guard.poll_reset(cx, H3Error::Internal.code())).await;
+}
+
 /// Finishes the response (`FIN`).
 #[inline]
 async fn send_finish(stream: &SharedRequest) -> Result<(), std::io::Error> {
@@ -581,6 +589,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
             None => {
                 if let Err(error) = send_interim_response(&stream, StatusCode::CONTINUE).await {
                     report(&stream_error_callback, stream_id, &error);
+                    abort(&stream).await;
                     return;
                 }
             }
@@ -596,6 +605,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                 format_args!("request handler error: {error}"),
             );
         }
+        abort(&stream).await;
         return;
     };
 
@@ -632,6 +642,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     {
         if let Err(error) = send_interim_response(&stream, StatusCode::CONTINUE).await {
             report(&stream_error_callback, stream_id, &error);
+            abort(&stream).await;
             return;
         }
     }
@@ -647,6 +658,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     .await
     {
         report(&stream_error_callback, stream_id, &error);
+        abort(&stream).await;
         return;
     }
 
@@ -672,6 +684,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                                 }
                                 if let Err(error) = send_data(&stream, data).await {
                                     report(&stream_error_callback, stream_id, &error);
+                                    abort(&stream).await;
                                     return;
                                 }
                             }
@@ -681,6 +694,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                                     stream_id,
                                     "response body data frame error",
                                 );
+                                abort(&stream).await;
                                 return;
                             }
                         }
@@ -690,6 +704,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                                 remove_invalid_http3_headers(&mut trailers);
                                 if let Err(error) = send_trailers(&stream, &trailers).await {
                                     report(&stream_error_callback, stream_id, &error);
+                                    abort(&stream).await;
                                     return;
                                 }
                                 break;
@@ -700,6 +715,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                                     stream_id,
                                     "response body trailers frame error",
                                 );
+                                abort(&stream).await;
                                 return;
                             }
                         }
@@ -711,6 +727,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                         stream_id,
                         format_args!("response body error: {error}"),
                     );
+                    abort(&stream).await;
                     return;
                 }
             }

@@ -912,7 +912,7 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
                 return Err(StreamError::Message);
             }
             regular.push((
-                HeaderName::from_bytes(&name).map_err(|_| StreamError::Message)?,
+                field_name(&name)?,
                 HeaderValue::from_maybe_shared(value).map_err(|_| StreamError::Message)?,
             ));
         }
@@ -1033,6 +1033,16 @@ fn connection_specific(name: &[u8], value: &[u8]) -> bool {
 
 /// Converts a decoded header list into a `HeaderMap`; pseudo-headers are
 /// invalid in a trailer section (RFC 9114 Section 4.1).
+/// A field name, which in HTTP/3 must be lowercase: `HeaderName` accepts
+/// `X-Upper` and lowercases it (RFC 9114 Section 4.2).
+#[inline]
+fn field_name(name: &[u8]) -> Result<HeaderName, StreamError> {
+    if name.iter().any(u8::is_ascii_uppercase) {
+        return Err(StreamError::Message);
+    }
+    HeaderName::from_bytes(name).map_err(|_| StreamError::Message)
+}
+
 #[inline]
 fn header_map(headers: Vec<(Bytes, Bytes)>) -> Result<HeaderMap, StreamError> {
     // `try_with_capacity` reports the map's capacity instead of panicking
@@ -1042,7 +1052,7 @@ fn header_map(headers: Vec<(Bytes, Bytes)>) -> Result<HeaderMap, StreamError> {
         if name.first() == Some(&b':') || connection_specific(&name, &value) {
             return Err(StreamError::Message);
         }
-        let name = HeaderName::from_bytes(&name).map_err(|_| StreamError::Message)?;
+        let name = field_name(&name)?;
         let value = HeaderValue::from_maybe_shared(value).map_err(|_| StreamError::Message)?;
         // `try_append` reports the map's capacity instead of panicking.
         if map.try_append(name, value).is_err() {

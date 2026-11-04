@@ -6,14 +6,16 @@ use http_body::Body;
 use http_body_util::BodyExt;
 use tokio::io::AsyncWriteExt;
 
-use crate::h1::{write_chunk_size, Http1, RawHandle, ZerocopyResponse, WRITE_BUF_BATCH_THRESHOLD};
+use crate::h1::{
+    write_chunk_size, Http1, ZerocopyResponse, ZerocopySend, WRITE_BUF_BATCH_THRESHOLD,
+};
 
 impl<Io> Http1<Io>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
 {
     #[inline]
-    pub(crate) async fn write_response<Z, ZFut>(
+    pub(crate) async fn write_response<Z: ZerocopySend<Io>>(
         &mut self,
         mut response: Response<
             impl Body<Data = bytes::Bytes, Error = impl std::error::Error> + Unpin,
@@ -21,12 +23,8 @@ where
         version: Version,
         write_trailers: bool,
         is_head: bool,
-        zerocopy_fn: Option<Z>,
-    ) -> Result<(), std::io::Error>
-    where
-        Z: FnMut(RawHandle, &'static Io, u64) -> ZFut,
-        ZFut: std::future::Future<Output = Result<(), std::io::Error>>,
-    {
+        zerocopy: &mut Z,
+    ) -> Result<(), std::io::Error> {
         // Date header
         if self.options.send_date_header {
             response.headers_mut().insert(
@@ -119,20 +117,16 @@ where
                 .and_then(|s| s.parse::<u64>().ok())
             {
                 if let Some(zero_copy) = parts.extensions.get::<ZerocopyResponse>() {
-                    if let Some(mut zerocopy_fn) = zerocopy_fn {
+                    if zerocopy.enabled() {
                         // Zerocopy
                         unsafe {
                             self.write_buf
                                 .flush(&mut self.io, self.options.enable_vectored_write)
                                 .await?
                         };
-                        zerocopy_fn(
-                            zero_copy.handle,
-                            // Safety: the lifetime of the static reference is bound by the lifetime of the Io struct
-                            unsafe { std::mem::transmute::<&Io, &'static Io>(&self.io) },
-                            content_length,
-                        )
-                        .await?;
+                        zerocopy
+                            .send(zero_copy, &mut self.io, content_length)
+                            .await?;
                         self.io.flush().await?;
                         let reclaimed_headers = parts.headers;
                         self.cached_headers = Some(reclaimed_headers);

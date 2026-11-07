@@ -1,8 +1,8 @@
 # `zincio-http` change log
 
-## `zincio-http` UNRELEASED
+## `zincio-http` 0.4.15
 
-**Not yet released**
+**Released in November 7, 2026**
 
 - Added `install_zerocopy_fd` and various HTTP/1.x zerocopy-related traits ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/50))
 - Fixed busy-looping while gracefully shutting down an HTTP/3 connection ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/39))

@@ -450,6 +450,36 @@ fn split_decoder_stream_chunk_repro() {
 }
 
 #[test]
+fn decoder_stream_batch_larger_than_one_instruction_is_accepted() {
+    // One QUIC chunk can carry many complete decoder-stream instructions:
+    // under load a peer acknowledges every field section it decodes and the
+    // transport may deliver all of those acknowledgments in a single chunk.
+    // The buffer bound applies to one instruction (10 octets), not to the
+    // chunk, so a valid batch must not raise QPACK_DECODER_STREAM_ERROR.
+    let mut enc = Encoder::new(256, false);
+    let mut batch = Vec::new();
+    for stream_id in (0..=316u64).step_by(4) {
+        integer::encode(&mut batch, stream_id, 7, 0x80);
+    }
+    assert!(batch.len() > 64, "batch is {} bytes", batch.len());
+    assert!(enc.feed_decoder_stream(&batch).is_ok());
+}
+
+#[test]
+fn endless_decoder_stream_continuation_is_rejected() {
+    // A prefixed integer is at most 10 octets (RFC 9204 Section 4.1.1).
+    // An instruction whose continuation bytes never terminate must be
+    // rejected instead of buffered forever.
+    let mut enc = Encoder::new(256, false);
+    let mut runaway = vec![0x3f]; // `00` + 6-bit increment prefix, all ones
+    runaway.extend_from_slice(&[0x80; 10]);
+    assert_eq!(
+        enc.feed_decoder_stream(&runaway),
+        Err(QpackError::DecoderStream)
+    );
+}
+
+#[test]
 fn insert_with_literal_name_huffman_flag_at_bit_five() {
     // Byte-level check: with Huffman on, the H flag of an Insert With
     // Literal Name must sit at bit 5 (0x20), not bit 4 (0x10).

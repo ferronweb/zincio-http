@@ -175,10 +175,9 @@ pub struct Decoder {
     decoder_stream_pending: Vec<u8>,
 }
 
-/// Upper bound on the buffered prefix of either peer stream. A complete
-/// decoder-stream instruction is a single prefixed integer of at most 10
-/// bytes, so a buffered prefix far larger than this can never become one.
-const MAX_DECODER_STREAM_PENDING: usize = 64;
+/// Largest possible decoder-stream instruction: a 6-bit prefix plus nine
+/// continuation octets carrying a 62-bit integer (RFC 9204 Section 4.1.1).
+const MAX_DECODER_STREAM_INSTRUCTION: usize = 10;
 
 /// Byte length of a string literal whose length integer starts at the
 /// beginning of `buf` with `prefix_bits` (the Huffman/control bit occupies the
@@ -312,10 +311,8 @@ impl Decoder {
         // A decoder-stream instruction is a single prefixed integer whose
         // length is known once enough bytes arrive; parse only complete
         // instructions and buffer any trailing partial one (RFC 9204 4.4). The
-        // QUIC stream beneath can deliver an instruction split across chunks.
-        if self.decoder_stream_pending.len() > MAX_DECODER_STREAM_PENDING {
-            return Err(QpackError::DecoderStream);
-        }
+        // QUIC stream beneath can deliver an instruction split across chunks,
+        // and a single chunk can carry many complete instructions.
         let mut consumed = 0;
         while consumed < self.decoder_stream_pending.len() {
             let Some(len) = decoder_instruction_len(&self.decoder_stream_pending[consumed..])
@@ -347,6 +344,13 @@ impl Decoder {
             consumed += len;
         }
         self.decoder_stream_pending.drain(..consumed);
+        // Only a truncated trailing instruction can remain. A prefixed
+        // integer is at most 10 octets, so a longer remainder is an
+        // instruction whose continuation bytes never terminate; reject it
+        // rather than buffer unbounded input (RFC 9204 Section 4.1.1).
+        if self.decoder_stream_pending.len() > MAX_DECODER_STREAM_INSTRUCTION {
+            return Err(QpackError::DecoderStream);
+        }
         Ok(())
     }
 

@@ -686,6 +686,31 @@ fn decoder_stream_section_ack_classifies_high_stream_id() {
 }
 
 #[test]
+fn decoder_stream_batch_larger_than_one_instruction_is_accepted() {
+    // A decoder-stream chunk may hold many complete instructions; the
+    // validation buffer bound is per instruction, not per chunk.
+    let mut dec = Decoder::new(0, 8);
+    let mut batch = Vec::new();
+    for stream_id in (0..=316u64).step_by(4) {
+        integer::encode(&mut batch, stream_id, 7, 0x80);
+    }
+    assert!(batch.len() > 64, "batch is {} bytes", batch.len());
+    assert!(dec.feed_decoder_stream(&batch).is_ok());
+}
+
+#[test]
+fn endless_decoder_stream_continuation_is_rejected() {
+    // A prefixed integer is at most 10 octets (RFC 9204 Section 4.1.1).
+    let mut dec = Decoder::new(0, 8);
+    let mut runaway = vec![0x3f];
+    runaway.extend_from_slice(&[0x80; 10]);
+    assert_eq!(
+        dec.feed_decoder_stream(&runaway),
+        Err(QpackError::DecoderStream)
+    );
+}
+
+#[test]
 fn capacity_eviction_guard() {
     // A capacity reduction in the same batch as the inserts it evicts is
     // rejected while nothing is acknowledged.

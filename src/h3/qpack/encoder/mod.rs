@@ -58,11 +58,9 @@ const STREAM_CANCELLATION: u8 = 0x40;
 /// `00` + 6-bit increment: Insert Count Increment (RFC 9204 4.4.3).
 const INSERT_COUNT_INCREMENT: u8 = 0x00;
 
-/// Upper bound on `decoder_stream_pending`. A complete decoder-stream
-/// instruction is a single prefixed integer of at most 10 bytes (a 62-bit
-/// integer), so a buffered prefix far larger than this can never become a
-/// valid instruction.
-const MAX_DECODER_STREAM_PENDING: usize = 64;
+/// Largest possible decoder-stream instruction: a 6-bit prefix plus nine
+/// continuation octets carrying a 62-bit integer (RFC 9204 Section 4.1.1).
+const MAX_DECODER_STREAM_INSTRUCTION: usize = 10;
 
 /// `1 T` + 6-bit index: Indexed Field Line (RFC 9204 4.5.2).
 const INDEXED: u8 = 0b1000_0000;
@@ -613,13 +611,8 @@ impl Encoder {
         // length is known once enough bytes have arrived. Parse only complete
         // instructions, leaving any trailing partial instruction buffered for
         // the next call (RFC 9204 Section 4.4). The QUIC stream beneath can
-        // deliver an instruction split across several `poll_recv` chunks.
-        // A complete instruction is at most 10 bytes (a 62-bit integer), so a
-        // much larger buffered prefix can never become one and is rejected to
-        // bound memory against a peer that streams continuation bytes.
-        if self.decoder_stream_pending.len() > MAX_DECODER_STREAM_PENDING {
-            return Err(QpackError::DecoderStream);
-        }
+        // deliver an instruction split across several `poll_recv` chunks, and
+        // a single chunk can equally carry many complete instructions.
         let data = &self.decoder_stream_pending;
         let mut consumed = 0;
         while consumed < data.len() {
@@ -694,6 +687,13 @@ impl Encoder {
             consumed += len;
         }
         self.decoder_stream_pending.drain(..consumed);
+        // Only a truncated trailing instruction can remain. A prefixed
+        // integer is at most 10 octets, so a longer remainder is an
+        // instruction whose continuation bytes never terminate; reject it
+        // rather than buffer unbounded input (RFC 9204 Section 4.1.1).
+        if self.decoder_stream_pending.len() > MAX_DECODER_STREAM_INSTRUCTION {
+            return Err(QpackError::DecoderStream);
+        }
         Ok(())
     }
 }

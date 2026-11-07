@@ -7,6 +7,7 @@
 - Added `install_zerocopy_fd` and various HTTP/1.x zerocopy-related traits ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/50))
 - Fixed busy-looping while gracefully shutting down an HTTP/3 connection ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/39))
 - Fixed HTTP/3 response being truncated when an internal handler error occured ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/48))
+- Fixed occasional HTTP/3 `QPACK_DECODER_STREAM_ERROR` connection failures when a QPACK decoder stream chunk carried many instructions. ([GitHub issue](https://github.com/ferronweb/ferron/issues/997))
 - Fixed QPACK decoder stream parsing for HTTP/3 reading wrong counts ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/47))
 - Fixed regular HTTP/3 requests erroring out with excessive load error due to pending-accept reset ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/45))
 - Fixed stalls for in-flight requests when gracefully shutting down an HTTP/2 connection.

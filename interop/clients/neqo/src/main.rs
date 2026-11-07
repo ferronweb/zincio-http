@@ -29,7 +29,7 @@ use std::net::{SocketAddr, ToSocketAddrs as _, UdpSocket};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use neqo_common::{Datagram, Tos, event::Provider as _};
+use neqo_common::{event::Provider as _, Datagram, Tos};
 use neqo_http3::{Header, Http3Client, Http3ClientEvent, Http3Parameters, Http3State, Priority};
 use neqo_transport::{EmptyConnectionIdGenerator, Output};
 use sha2::{Digest as _, Sha256};
@@ -58,7 +58,11 @@ fn pattern(n: usize) -> Vec<u8> {
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// Prints one observation line. Mirrors Observation::to_line.
@@ -66,8 +70,7 @@ fn emit(status: u16, length: usize, digest: &str, trailers: bool, hints: bool, e
     let sha = if digest.is_empty() { "-" } else { digest };
     println!(
         "status={status} len={length} sha={sha} trailers={} hints={} err={err}",
-        trailers as u8,
-        hints as u8,
+        trailers as u8, hints as u8,
     );
 }
 
@@ -489,7 +492,9 @@ fn observe(id: neqo_transport::StreamId, resps: &HashMap<neqo_transport::StreamI
 /// Extra request headers for scenarios that need them.
 fn build_headers(scenario: &str) -> Vec<(String, String)> {
     match scenario {
-        "many_headers" => (0..200).map(|i| (format!("x-interop-{i:04}"), "v".to_owned())).collect(),
+        "many_headers" => (0..200)
+            .map(|i| (format!("x-interop-{i:04}"), "v".to_owned()))
+            .collect(),
         "big_header_rejected" => vec![("x-big".to_owned(), "v".repeat(32 * 1024))],
         "expect_continue" => vec![("expect".to_owned(), "100-continue".to_owned())],
         _ => Vec::new(),

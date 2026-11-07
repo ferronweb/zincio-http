@@ -65,7 +65,11 @@ fn pattern(n: usize) -> Vec<u8> {
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// Prints one observation line. Mirrors Observation::to_line.
@@ -73,8 +77,7 @@ fn emit(status: u16, length: usize, digest: &str, trailers: bool, hints: bool, e
     let sha = if digest.is_empty() { "-" } else { digest };
     println!(
         "status={status} len={length} sha={sha} trailers={} hints={} err={err}",
-        trailers as u8,
-        hints as u8,
+        trailers as u8, hints as u8,
     );
 }
 
@@ -178,11 +181,7 @@ impl Endpoint {
     /// before any stream is tracked, and returning early there would spin
     /// without ever reading the ACKs that unblock the send. Termination on
     /// completed streams is the caller's job (see [`Self::drive`]).
-    fn iterate(
-        &mut self,
-        resps: &mut HashMap<u64, Resp>,
-        deadline: Instant,
-    ) -> Result<(), String> {
+    fn iterate(&mut self, resps: &mut HashMap<u64, Resp>, deadline: Instant) -> Result<(), String> {
         self.flush()?;
         self.drain_h3(resps)?;
         self.flush()?;
@@ -418,10 +417,7 @@ fn connect(base_url: &str) -> Result<Endpoint, String> {
         let _ = endpoint.socket.set_read_timeout(Some(wait));
         match endpoint.socket.recv_from(&mut buf) {
             Ok((len, from)) => {
-                let info = quiche::RecvInfo {
-                    to: local,
-                    from,
-                };
+                let info = quiche::RecvInfo { to: local, from };
                 let _ = endpoint.conn.recv(&mut buf[..len], info);
             }
             Err(err)
@@ -434,8 +430,7 @@ fn connect(base_url: &str) -> Result<Endpoint, String> {
         }
     }
 
-    let h3_config =
-        quiche::h3::Config::new().map_err(|err| format!("h3_config:{err:?}"))?;
+    let h3_config = quiche::h3::Config::new().map_err(|err| format!("h3_config:{err:?}"))?;
     let h3 = quiche::h3::Connection::with_transport(&mut endpoint.conn, &h3_config)
         .map_err(|err| format!("h3_transport:{err:?}"))?;
     endpoint.h3 = Some(h3);
@@ -509,8 +504,7 @@ fn send_request(
             .collect();
         loop {
             let h3 = endpoint.h3.as_mut().ok_or("no_h3")?;
-            match h3.send_additional_headers(&mut endpoint.conn, id, &trailer_headers, true, true)
-            {
+            match h3.send_additional_headers(&mut endpoint.conn, id, &trailer_headers, true, true) {
                 Ok(()) => break,
                 Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => {
                     endpoint.iterate(resps, deadline)?;
@@ -550,7 +544,9 @@ fn observe(id: u64, resps: &HashMap<u64, Resp>) {
 /// Extra request headers for scenarios that need them.
 fn build_headers(scenario: &str) -> Vec<(String, String)> {
     match scenario {
-        "many_headers" => (0..200).map(|i| (format!("x-interop-{i:04}"), "v".to_owned())).collect(),
+        "many_headers" => (0..200)
+            .map(|i| (format!("x-interop-{i:04}"), "v".to_owned()))
+            .collect(),
         "big_header_rejected" => vec![("x-big".to_owned(), "v".repeat(32 * 1024))],
         "expect_continue" => vec![("expect".to_owned(), "100-continue".to_owned())],
         _ => Vec::new(),
@@ -784,12 +780,10 @@ fn run_idle(base_url: &str, method: &str, path: &str, idle_ms: u64) -> Result<()
                 None,
             )
             .and_then(|id| {
-                endpoint
-                    .drive(&mut resps, deadline)
-                    .map(|()| {
-                        endpoint.close_gracefully();
-                        observe(id, &resps);
-                    })
+                endpoint.drive(&mut resps, deadline).map(|()| {
+                    endpoint.close_gracefully();
+                    observe(id, &resps);
+                })
             });
             if attempt.is_ok() {
                 return Ok(());

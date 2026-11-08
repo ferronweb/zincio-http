@@ -723,6 +723,8 @@ enum StreamDataState {
     Idle,
     Closed,
     Bad,
+    /// More data than the request's `content-length`.
+    TooLong,
     Gone,
     Ok,
 }

@@ -809,3 +809,36 @@ fn complete_field_block_within_limit_is_not_reset() {
         "a bounded field block must not be reset, got {decoded:?}"
     );
 }
+
+#[test]
+fn data_past_the_content_length_is_a_stream_error_at_once() {
+    // RFC 9113 Section 8.1.1: the DATA frames must add up to `content-length`.
+    // Excess is malformed as soon as it arrives, whether or not the handler
+    // still reads the body (it may stop at the declared length).
+    let mut encoder = Encoder::new(4096);
+    let mut block = Vec::new();
+    encoder.encode(
+        &[
+            HpackHeader::new(":method", "POST"),
+            HpackHeader::new(":scheme", "http"),
+            HpackHeader::new(":path", "/"),
+            HpackHeader::new(":authority", "x"),
+            HpackHeader::new("content-length", "4"),
+        ],
+        &mut block,
+    );
+    let script = client_script(|writer, out| {
+        writer.write_headers(out, 1, false, true, None, &block);
+        writer.write_data(out, 1, false, b"test");
+        writer.write_data(out, 1, false, b"test");
+    });
+    let reply = run_connection(CLIENT_PREFACE, &script, Some(Duration::from_secs(5)), None);
+    let decoded = decode_frames(&reply);
+    assert!(
+        decoded.iter().any(|f| matches!(
+            f,
+            Frame::Reset { stream_id: 1, error_code } if *error_code == Reason::ProtocolError.code()
+        )),
+        "{decoded:?}"
+    );
+}

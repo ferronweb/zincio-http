@@ -211,6 +211,9 @@ pub struct Connection<Io> {
     /// only drain already-open streams until they finish or the drain
     /// window elapses (RFC 9113 Section 6.8).
     graceful: bool,
+    /// The peer sent GOAWAY: it opens no more streams, and the connection
+    /// closes once the ones it has are done (RFC 9113 Section 6.8).
+    peer_goaway: bool,
     /// Last stream id advertised in the graceful-shutdown GOAWAY; peers
     /// must not open streams beyond it.
     graceful_last_stream: u32,
@@ -265,6 +268,7 @@ where
             highest_stream_id: 0,
             closing: false,
             graceful: false,
+            peer_goaway: false,
             graceful_last_stream: 0,
             shutdown: None,
             date_cache: Arc::new(DateCache::new()),
@@ -407,8 +411,8 @@ where
 
         let mut buf = [0u8; 8192];
         let mut wake_rx_drain = Vec::new();
-        let mut peer_goaway = false;
-        while !peer_goaway && !(self.graceful && self.streams.is_empty()) {
+        let mut close = false;
+        while !close && !((self.graceful || self.peer_goaway) && self.streams.is_empty()) {
             let wake_recv = wake_rx.recv().fuse();
             let read = tokio::io::AsyncReadExt::read(&mut self.io, &mut buf).fuse();
             // Graceful-shutdown signal: never fires without a token. The
@@ -459,7 +463,7 @@ where
                         break; // peer closed; nothing more to say
                     }
                     self.decoder.extend(&buf[..n]);
-                    peer_goaway = self.process_frames(&request_fn).await?;
+                    close = self.process_frames(&request_fn).await?;
                     self.drain_outbound();
                     self.flush().await?;
                 }
@@ -526,8 +530,8 @@ where
     }
 
     /// Decodes and handles every frame currently buffered. Returns
-    /// `Ok(true)` when the connection should end (peer GOAWAY or an
-    /// error we answered with GOAWAY).
+    /// `Ok(true)` when the connection should end at once (an error we
+    /// answered with GOAWAY); a peer's GOAWAY only sets `peer_goaway`.
     #[inline]
     async fn process_frames<F, Fut, ResB, ResBE, ResE>(
         &mut self,
@@ -569,7 +573,9 @@ where
                     self.writer.write_ping_ack(&mut self.out, &payload);
                 }
                 Frame::Ping { ack: true, .. } => {}
-                Frame::GoAway { .. } => return Ok(true),
+                // Read on: what came with it is answered, and the streams it
+                // leaves run to their end.
+                Frame::GoAway { .. } => self.peer_goaway = true,
                 Frame::Headers {
                     stream_id,
                     end_stream,

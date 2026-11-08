@@ -558,8 +558,14 @@ where
                     ack: false,
                     settings,
                 } => {
-                    self.apply_peer_settings(&settings);
+                    let raised = self.apply_peer_settings(&settings);
                     self.writer.write_settings_ack(&mut self.out);
+                    if raised {
+                        // DATA queued on the smaller windows may go now, after the
+                        // ACK (the peer counts the new window from it); no
+                        // WINDOW_UPDATE need follow to release it.
+                        self.drain_pending_data(None);
+                    }
                 }
                 Frame::Settings { ack: true, .. } => {}
                 Frame::Ping {

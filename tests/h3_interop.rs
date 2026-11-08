@@ -1848,3 +1848,60 @@ async fn fixture_client_pending_accept_resets_over_time_keep_the_connection() {
     .await
     .expect("fixture_client_pending_accept_resets_over_time_keep_the_connection timed out");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_request_head_past_header_timeout_is_reset() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let cancel = CancellationToken::new();
+        let (server_thread, server_result) = spawn_native_server(
+            server_conn,
+            Http3Options::new().header_timeout(Some(Duration::from_millis(300))),
+            cancel.clone(),
+            |_request| async move {
+                Ok::<_, std::io::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from_static(b"ok")))
+                        .expect("response"),
+                )
+            },
+        );
+
+        let mut fixture = Fixture::new(client_conn).await;
+        // A request stream that never finishes its head (slowloris, one
+        // stream at a time): the start of a HEADERS frame, then nothing.
+        let (mut send, recv) = fixture.conn.open_bi().await.expect("open request stream");
+        send.write_all(&[0x01, 0x20])
+            .await
+            .expect("partial HEADERS");
+        assert_eq!(
+            reset_code(recv).await,
+            Some(0x010d),
+            "H3_REQUEST_INCOMPLETE expected"
+        );
+
+        // The connection serves on.
+        let (mut send, recv) = fixture
+            .request_open(&pseudo(&[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":authority", "localhost"),
+                (":path", "/ok"),
+            ]))
+            .await;
+        send.finish().expect("finish request");
+        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
+        assert_eq!(data, b"ok");
+
+        cancel.cancel();
+        let result = server_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        assert!(result.is_ok(), "server handle: {result:?}");
+        server_thread.join().expect("join server");
+    })
+    .await
+    .expect("fixture_client_request_head_past_header_timeout_is_reset timed out");
+}

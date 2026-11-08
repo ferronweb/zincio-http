@@ -22,6 +22,7 @@ pub struct Http3Options {
     pub(super) send_date_header: bool,
     pub(super) max_local_error_reset_streams: Option<usize>,
     pub(super) max_pending_accept_reset_streams: Option<usize>,
+    pub(super) header_timeout: Option<std::time::Duration>,
 }
 
 impl Http3Options {
@@ -39,6 +40,7 @@ impl Http3Options {
     /// | `enable_connect_protocol` | `false` |
     /// | `max_local_error_reset_streams` | `1024` |
     /// | `max_pending_accept_reset_streams` | `20` |
+    /// | `header_timeout` | none |
     ///
     /// The QPACK/limit settings are advertised to the peer in this
     /// endpoint's SETTINGS frame and bound its codecs: the decoder's
@@ -56,6 +58,7 @@ impl Http3Options {
             send_date_header: true,
             max_local_error_reset_streams: Some(1024),
             max_pending_accept_reset_streams: Some(20),
+            header_timeout: None,
         }
     }
 
@@ -106,6 +109,17 @@ impl Http3Options {
     #[inline]
     pub fn enable_connect_protocol(mut self, enable: bool) -> Self {
         self.local_settings.enable_connect_protocol = enable;
+        self
+    }
+
+    /// Sets how long a request stream may take to deliver its head. Past it
+    /// the stream is reset with `H3_REQUEST_INCOMPLETE`, counted against
+    /// `max_local_error_reset_streams`, so a client cannot hold streams open
+    /// by never finishing a request (slowloris), as HTTP/1.1's
+    /// `header_read_timeout` prevents. Defaults to `None` (no limit).
+    #[inline]
+    pub fn header_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.header_timeout = timeout;
         self
     }
 

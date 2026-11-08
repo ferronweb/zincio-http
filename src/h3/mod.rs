@@ -421,6 +421,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     send_date_header: bool,
     conn_state: Arc<parking_lot::Mutex<ConnResetState>>,
     stream_error_callback: Option<StreamErrorCallback>,
+    header_timeout: Option<std::time::Duration>,
 ) where
     F: Fn(Request<Incoming>) -> Fut,
     Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
@@ -441,7 +442,26 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     // Read the request.
     let request_headers = {
         let mut guard = stream.lock().await;
-        std::future::poll_fn(|cx| guard.poll_headers(cx)).await
+        let head = std::future::poll_fn(|cx| guard.poll_headers(cx));
+        match header_timeout {
+            Some(limit) => match zincio::time::timeout(limit, head).await {
+                Ok(head) => head,
+                Err(_) => {
+                    // The head never finished: slowloris, one stream at a
+                    // time. The reset counts against the local-reset budget.
+                    let code = H3Error::RequestIncomplete.code();
+                    let _ = std::future::poll_fn(|cx| guard.poll_reset(cx, code)).await;
+                    let _ = std::future::poll_fn(|cx| guard.poll_stop_sending(cx, code)).await;
+                    drop(guard);
+                    let mut state = conn_state.lock();
+                    if let Some(code) = state.note_local_error_reset() {
+                        state.close_code = Some(code);
+                    }
+                    return;
+                }
+            },
+            None => head.await,
+        }
     };
     let request = match request_headers {
         Ok(Some(request)) => request,
@@ -855,6 +875,7 @@ where
                 .ok_or_else(|| std::io::Error::other("no io to handshake"))?;
             let date_cache = date_header_value_cached;
             let send_continue_response = options.send_continue_response;
+            let header_timeout = options.header_timeout;
             let send_date_header = options.send_date_header;
 
             // The QUIC handshake may not be complete yet (0-RTT); wait for
@@ -1140,6 +1161,7 @@ where
                                         send_date_header,
                                         conn_state_for_task,
                                         stream_error_callback,
+                                        header_timeout,
                                     )
                                     .await;
                                 });

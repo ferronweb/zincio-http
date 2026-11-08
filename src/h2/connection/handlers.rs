@@ -233,13 +233,14 @@ where
             }
             return;
         }
-        let parsed = match crate::h2::stream::parse_request(&decoded) {
-            Ok(parsed) => parsed,
-            Err(MalformedRequest) => {
-                self.stream_error(stream_id, Reason::ProtocolError);
-                return;
-            }
-        };
+        let parsed =
+            match crate::h2::stream::parse_request(&decoded, self.opts.enable_connect_protocol) {
+                Ok(parsed) => parsed,
+                Err(MalformedRequest) => {
+                    self.stream_error(stream_id, Reason::ProtocolError);
+                    return;
+                }
+            };
         if end_stream {
             // No DATA frame will follow: close the request body now so the
             // handler's body reader sees end-of-stream (RFC 9113 Section
@@ -284,9 +285,9 @@ where
         let send_continue_body = send_continue.then(|| Arc::new(AtomicBool::new(false)));
         let (early_hints, early_hints_rx) = EarlyHints::new_lazy();
 
-        let mut request = Request::new(if parsed.is_connect {
-            Incoming::Empty
-        } else if let Some(body_rx) = body_rx {
+        // A tunnel's request body is what the client sends through it
+        // (Section 8.5).
+        let mut request = Request::new(if let Some(body_rx) = body_rx {
             Incoming::H2(H2Body::new(body_rx, send_continue_body.clone()))
         } else {
             // The request ended with HEADERS, so no body frames can
@@ -298,6 +299,9 @@ where
         *request.version_mut() = http::Version::HTTP_2;
         *request.headers_mut() = parsed.headers;
         request.extensions_mut().insert(early_hints);
+        if let Some(protocol) = parsed.protocol {
+            request.extensions_mut().insert(protocol);
+        }
         if end_stream && parsed.content_length.is_some_and(|cl| cl != 0) {
             // A request that ended without delivering its declared
             // body: stream error (RFC 9113 Section 8.1.2.6).

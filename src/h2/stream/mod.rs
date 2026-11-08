@@ -39,6 +39,7 @@ use pin_project_lite::pin_project;
 
 use super::hpack::Header;
 use crate::early_hints::EarlyHintsReceiver;
+use crate::Protocol;
 
 /// Messages the connection task sends to a stream task: request body
 /// frames and terminal signals.
@@ -301,7 +302,11 @@ pub(crate) struct ParsedRequest {
     pub(crate) content_length: Option<u64>,
     /// The request carries `expect: 100-continue`.
     pub(crate) expect_continue: bool,
+    /// A tunnel: CONNECT, plain or extended. The stream after the response
+    /// head carries its bytes both ways (Section 8.5).
     pub(crate) is_connect: bool,
+    /// An extended CONNECT's `:protocol` (RFC 8441).
+    pub(crate) protocol: Option<Protocol>,
 }
 
 /// The HEADERS block was rejected as malformed (RFC 9113
@@ -333,9 +338,14 @@ pub(crate) fn is_connection_specific(name: &[u8]) -> bool {
 /// Section 8.1.2.6): pseudo-header rules (Section 8.1.2.1), required
 /// and unique request pseudo-headers (Section 8.1.2.3),
 /// connection-specific header fields (Section 8.1.2.2) and
-/// `content-length` syntax (Section 8.1.2.6).
+/// `content-length` syntax (Section 8.1.2.6). `connect_protocol`: the
+/// server sent SETTINGS_ENABLE_CONNECT_PROTOCOL, so an extended CONNECT
+/// is allowed (RFC 8441).
 #[inline]
-pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, MalformedRequest> {
+pub(crate) fn parse_request(
+    headers: &[Header],
+    connect_protocol: bool,
+) -> Result<ParsedRequest, MalformedRequest> {
     let mut method: Option<&[u8]> = None;
     let mut scheme: Option<&[u8]> = None;
     let mut authority: Option<&[u8]> = None;
@@ -424,9 +434,8 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
     let Some(method) = method else {
         return Err(MalformedRequest);
     };
-    if is_connect {
-        // CONNECT (Sections 8.3, 8.5): only :authority (and optionally
-        // :protocol, RFC 8441).
+    if is_connect && protocol.is_none() {
+        // CONNECT (Sections 8.3, 8.5): only :authority.
         let Some(authority) = authority else {
             return Err(MalformedRequest);
         };
@@ -444,12 +453,19 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
             content_length,
             expect_continue: false,
             is_connect: true,
+            protocol: None,
         });
     }
-    if protocol.is_some() {
-        // :protocol is only valid aboard CONNECT (RFC 8441).
-        return Err(MalformedRequest);
-    }
+    // An extended CONNECT (RFC 8441 Sections 4 and 5): :protocol only on
+    // CONNECT, once the server has allowed it, with :scheme, :path and
+    // :authority as on any other request.
+    let protocol = match protocol {
+        None => None,
+        Some(_) if !is_connect || !connect_protocol || authority.is_none() => {
+            return Err(MalformedRequest);
+        }
+        Some(value) => Some(Protocol::from_bytes(value).ok_or(MalformedRequest)?),
+    };
     let Some(scheme) = scheme else {
         return Err(MalformedRequest);
     };
@@ -492,7 +508,8 @@ pub(crate) fn parse_request(headers: &[Header]) -> Result<ParsedRequest, Malform
         headers: regular,
         content_length,
         expect_continue,
-        is_connect: false,
+        is_connect: protocol.is_some(),
+        protocol,
     })
 }
 

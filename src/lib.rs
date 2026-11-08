@@ -59,6 +59,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod early_hints;
+mod ext;
 #[cfg(feature = "h1")]
 mod h1;
 #[cfg(feature = "h2")]
@@ -72,6 +73,7 @@ mod upgrade;
 pub mod hpack;
 
 pub use early_hints::*;
+pub use ext::*;
 #[cfg(feature = "h1")]
 pub use h1::*;
 #[cfg(feature = "h2")]

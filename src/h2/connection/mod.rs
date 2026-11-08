@@ -39,6 +39,9 @@ use super::date::DateCache;
 use super::error::Reason;
 use super::hpack::{Decoder as HpackDecoder, Encoder, Header as HpackHeader, HpackError};
 use super::sanitize_response;
+
+/// How long a closing connection reads on for the peer's close ([`Connection::linger`]).
+const LINGER: Duration = Duration::from_secs(2);
 use super::stream::{
     BodyMsg, H2Body, MalformedRequest, ParsedRequest, StreamDriver, StreamEntry, StreamMsg,
 };
@@ -496,7 +499,24 @@ where
         if let Some(error) = self.connection_error.take() {
             return Err(error);
         }
+        if self.peer_goaway || self.graceful {
+            self.linger().await;
+        }
         Ok(())
+    }
+
+    /// Ends a connection the peer may still be writing to (after a GOAWAY
+    /// either way): our side closes, then what the peer still sends is read
+    /// and dropped until it closes too, for [`LINGER`] at most. Closing with
+    /// unread data makes the kernel reset the connection, and the peer may
+    /// then lose our last frames (nginx's lingering close).
+    async fn linger(&mut self) {
+        let _ = tokio::io::AsyncWriteExt::shutdown(&mut self.io).await;
+        let mut buf = [0u8; 4096];
+        let _ = zincio::time::timeout(LINGER, async {
+            while let Ok(1..) = tokio::io::AsyncReadExt::read(&mut self.io, &mut buf).await {}
+        })
+        .await;
     }
 
     /// Reads the 24-octet client preface.

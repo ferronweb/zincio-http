@@ -180,6 +180,8 @@ pub(crate) struct SharedCodecs {
     /// SETTINGS). `wait_for_encoder` awaits this; the control plane calls
     /// `notify_waiters` once.
     pub(crate) encoder_notify: Notify,
+    /// Waker for connection driver (used for encoder stream pushes)
+    pub(crate) driver_waiter: Mutex<Option<Waker>>,
 }
 
 impl SharedCodecs {
@@ -208,6 +210,7 @@ impl SharedCodecs {
             local_max_field_section_size: local.max_field_section_size,
             waiters: Mutex::new(FxHashMap::default()),
             encoder_notify: Notify::new(),
+            driver_waiter: Mutex::new(None),
         }
     }
 
@@ -690,6 +693,9 @@ impl RequestStream {
         let encoder_stream = section.encoder_stream;
         if !encoder_stream.is_empty() {
             self.shared.encoder_stream.lock().push_back(encoder_stream);
+            if let Some(waiter) = self.shared.driver_waiter.lock().take() {
+                waiter.wake();
+            }
         }
         let mut frame_header =
             BytesMut::with_capacity(1 + crate::h3::frame::varint_size(block.len() as u64));

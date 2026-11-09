@@ -991,6 +991,17 @@ where
                     }
                 }
 
+                // If the waiter is taken and waked up:
+                //   the task would be "waken" up and run again
+                // If the waiter is taken but nothing waked up while this is polling:
+                //   the task would be still running
+                {
+                    let mut waiter = shared.driver_waiter.lock();
+                    if waiter.as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
+                        *waiter = Some(cx.waker().clone());
+                    }
+                }
+
                 // Hand the request streams' queued QPACK encoder
                 // instructions to the control plane.
                 controls.queue_encoder_streams_from_shared(&shared);

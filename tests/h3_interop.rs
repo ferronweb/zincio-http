@@ -217,7 +217,7 @@ impl Fixture {
 
         Fixture {
             conn,
-            encoder: Encoder::new(0, 16, false),
+            encoder: Encoder::new(0, false),
             decoder: Decoder::new(capacity, blocked as usize),
             control,
             encoder_stream,

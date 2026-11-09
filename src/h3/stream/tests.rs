@@ -118,7 +118,7 @@ fn local_settings() -> LocalSettings {
 #[inline]
 fn shared_with_encoder() -> Arc<SharedCodecs> {
     let shared = SharedCodecs::new(&local_settings());
-    *shared.encoder.lock() = Some(Encoder::new(4096, 16, true));
+    *shared.encoder.lock() = Some(Encoder::new(4096, true));
     Arc::new(shared)
 }
 
@@ -127,7 +127,7 @@ fn shared_with_encoder() -> Arc<SharedCodecs> {
 #[inline]
 fn shared_and_peer_encoder() -> (Arc<SharedCodecs>, Encoder) {
     let shared = SharedCodecs::new(&local_settings());
-    *shared.encoder.lock() = Some(Encoder::new(4096, 16, true));
+    *shared.encoder.lock() = Some(Encoder::new(4096, true));
     let peer_encoder = Encoder::new(4096, true);
     (Arc::new(shared), peer_encoder)
 }
@@ -590,7 +590,7 @@ fn response_over_peer_field_section_limit() {
     // Capacity 0 disables the dynamic table (RFC 9204 Section 3.2.3),
     // so the field section is encoded inline as literal lines instead
     // of shrinking to a dynamic-table reference.
-    *shared.encoder.lock() = Some(Encoder::new(0, 16, true));
+    *shared.encoder.lock() = Some(Encoder::new(0, true));
     *shared.peer_max_field_section_size.lock() = Some(10);
     let shared = Arc::new(shared);
     let stream = MockBidi::new(49);

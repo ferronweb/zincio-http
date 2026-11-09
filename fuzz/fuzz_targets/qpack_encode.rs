@@ -38,7 +38,7 @@ fuzz_target!(|data: &[u8]| {
         i += name_len + value_len;
     }
 
-    let mut encoder = Encoder::new(capacity, can_block, huffman);
+    let mut encoder = Encoder::with_max_blocked(capacity, can_block, huffman);
     let mut decoder = Decoder::new(capacity, 100);
     if let Some(bytes) = encoder.set_capacity(capacity) {
         decoder

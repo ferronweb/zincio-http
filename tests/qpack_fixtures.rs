@@ -263,7 +263,7 @@ fn assert_headers(actual: &[(Bytes, Bytes)], expected: &[(Bytes, Bytes)]) {
 /// headers. The decoder advertises the story capacity; the encoder warms its
 /// dynamic table to that capacity first.
 fn replay_encode(story: &Story) {
-    let mut encoder = Encoder::new(story.table_capacity, 16, false);
+    let mut encoder = Encoder::new(story.table_capacity, false);
     let mut decoder = Decoder::new(story.table_capacity, story.max_blocked_streams);
     if let Some(bytes) = encoder.set_capacity(story.table_capacity) {
         decoder

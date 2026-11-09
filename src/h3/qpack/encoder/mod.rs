@@ -128,10 +128,27 @@ pub struct Encoder {
 
 impl Encoder {
     /// Creates an encoder bound to a decoder that advertised the given
+    /// `max_capacity` in SETTINGS_QPACK_MAX_TABLE_CAPACITY.
+    #[inline]
+    pub fn new(max_capacity: u64, huffman: bool) -> Self {
+        Self {
+            dynamic: DynamicTable::new(0),
+            max_capacity,
+            max_blocked: u64::MAX,
+            blocked_by_stream: rustc_hash::FxHashMap::default(),
+            huffman,
+            known_received: 0,
+            pending_refs: VecDeque::new(),
+            cached_min_pending: u64::MAX,
+            decoder_stream_pending: Vec::new(),
+        }
+    }
+
+    /// Creates an encoder bound to a decoder that advertised the given
     /// `max_capacity` in SETTINGS_QPACK_MAX_TABLE_CAPACITY and `max_blocked`
     /// in SETTINGS_QPACK_BLOCKED_STREAMS.
     #[inline]
-    pub fn new(max_capacity: u64, max_blocked: u64, huffman: bool) -> Self {
+    pub fn with_max_blocked(max_capacity: u64, max_blocked: u64, huffman: bool) -> Self {
         Self {
             dynamic: DynamicTable::new(0),
             max_capacity,

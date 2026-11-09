@@ -712,7 +712,7 @@ impl ControlStreams {
                 self.settings_received = true;
                 self.peer.apply(&settings);
                 {
-                    *self.shared.encoder.lock() = Some(Encoder::new(
+                    *self.shared.encoder.lock() = Some(Encoder::with_max_blocked(
                         self.peer.qpack_max_table_capacity(),
                         self.peer.qpack_blocked_streams(),
                         true,

@@ -118,7 +118,7 @@ fn local_settings() -> LocalSettings {
 #[inline]
 fn shared_with_encoder() -> Arc<SharedCodecs> {
     let shared = SharedCodecs::new(&local_settings());
-    *shared.encoder.lock() = Some(Encoder::new(4096, true));
+    *shared.encoder.lock() = Some(Encoder::new(4096, 16, true));
     Arc::new(shared)
 }
 
@@ -127,8 +127,8 @@ fn shared_with_encoder() -> Arc<SharedCodecs> {
 #[inline]
 fn shared_and_peer_encoder() -> (Arc<SharedCodecs>, Encoder) {
     let shared = SharedCodecs::new(&local_settings());
-    *shared.encoder.lock() = Some(Encoder::new(4096, true));
-    let peer_encoder = Encoder::new(4096, true);
+    *shared.encoder.lock() = Some(Encoder::new(4096, 16, true));
+    let peer_encoder = Encoder::new(4096, 16, true);
     (Arc::new(shared), peer_encoder)
 }
 
@@ -453,7 +453,7 @@ fn headers_blocked_then_unblocked_by_encoder_stream() {
         Bytes::from_static(b"x-warmup"),
         Bytes::from_static(b"wednesday"),
     ));
-    let mut peer_enc = Encoder::new(64, true);
+    let mut peer_enc = Encoder::new(64, 16, true);
     let section = peer_enc.encode_section(0, &lines);
     assert!(!section.encoder_stream.is_empty());
 
@@ -590,7 +590,7 @@ fn response_over_peer_field_section_limit() {
     // Capacity 0 disables the dynamic table (RFC 9204 Section 3.2.3),
     // so the field section is encoded inline as literal lines instead
     // of shrinking to a dynamic-table reference.
-    *shared.encoder.lock() = Some(Encoder::new(0, true));
+    *shared.encoder.lock() = Some(Encoder::new(0, 16, true));
     *shared.peer_max_field_section_size.lock() = Some(10);
     let shared = Arc::new(shared);
     let stream = MockBidi::new(49);
@@ -629,7 +629,7 @@ fn duplicate_response_is_message_error() {
 #[test]
 fn missing_method_is_message_error() {
     let shared = shared_with_encoder();
-    let mut peer_enc = Encoder::new(4096, true);
+    let mut peer_enc = Encoder::new(4096, 16, true);
     let section = peer_enc.encode_section(
         0,
         &[
@@ -660,7 +660,7 @@ fn missing_method_is_message_error() {
 #[test]
 fn unknown_pseudo_header_is_message_error() {
     let shared = shared_with_encoder();
-    let mut peer_enc = Encoder::new(4096, true);
+    let mut peer_enc = Encoder::new(4096, 16, true);
     let section = peer_enc.encode_section(
         0,
         &[
@@ -690,7 +690,7 @@ fn unknown_pseudo_header_is_message_error() {
 #[test]
 fn pseudo_header_after_regular_is_message_error() {
     let shared = shared_with_encoder();
-    let mut peer_enc = Encoder::new(4096, true);
+    let mut peer_enc = Encoder::new(4096, 16, true);
     let section = peer_enc.encode_section(
         0,
         &[
@@ -725,7 +725,7 @@ fn pseudo_header_after_regular_is_message_error() {
 fn connect_request_shape() {
     // Plain CONNECT: only :method and :authority.
     let shared = shared_with_encoder();
-    let mut peer_enc = Encoder::new(4096, true);
+    let mut peer_enc = Encoder::new(4096, 16, true);
     let section = peer_enc.encode_section(
         0,
         &[
@@ -763,7 +763,7 @@ fn connect_request_shape() {
 
     // Extended CONNECT: adds :scheme and :protocol, never :path.
     let shared = shared_with_encoder();
-    let mut peer_enc = Encoder::new(4096, true);
+    let mut peer_enc = Encoder::new(4096, 16, true);
     let section = peer_enc.encode_section(
         0,
         &[
@@ -804,7 +804,7 @@ fn connect_request_shape() {
 #[test]
 fn connect_with_path_is_message_error() {
     let shared = shared_with_encoder();
-    let mut peer_enc = Encoder::new(4096, true);
+    let mut peer_enc = Encoder::new(4096, 16, true);
     let section = peer_enc.encode_section(
         0,
         &[

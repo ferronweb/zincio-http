@@ -14,12 +14,13 @@ use libfuzzer_sys::fuzz_target;
 use zincio_http::qpack::{Decoder, Encoder};
 
 fuzz_target!(|data: &[u8]| {
-    if data.len() < 3 {
+    if data.len() < 5 {
         return;
     }
     let capacity = u64::from(u16::from_be_bytes([data[0], data[1]])) % 16385;
-    let huffman = data[2] & 1 == 1;
-    let rest = &data[3..];
+    let can_block = u64::from(u16::from_be_bytes([data[2], data[3]])) % 16385;
+    let huffman = data[4] & 1 == 1;
+    let rest = &data[5..];
 
     let mut headers: Vec<(Bytes, Bytes)> = Vec::new();
     let mut i = 0;
@@ -37,7 +38,7 @@ fuzz_target!(|data: &[u8]| {
         i += name_len + value_len;
     }
 
-    let mut encoder = Encoder::new(capacity, huffman);
+    let mut encoder = Encoder::new(capacity, can_block, huffman);
     let mut decoder = Decoder::new(capacity, 100);
     if let Some(bytes) = encoder.set_capacity(capacity) {
         decoder

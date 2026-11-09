@@ -21,7 +21,7 @@ fn decoder_stream_section_ack_classifies_high_stream_id() {
     // it as an Insert Count Increment (which rejects a zero value)
     // was a latent bug that only surfaced for stream IDs at or above
     // 64 (RFC 9204 Section 4.4.1).
-    let mut enc = Encoder::new(256, false);
+    let mut enc = Encoder::new(256, 16, false);
     enc.encode_section(64, &[hdr("a", "b")]);
     assert!(enc.pending_refs.iter().any(|(id, _)| *id == 64));
     // 0xC0: Section Acknowledgment, Stream ID 64.
@@ -50,7 +50,7 @@ fn stray_decoder_stream_instructions_are_benign() {
     // (or never outstanding). RFC 9204 Section 4.4 defines no error for
     // these; treating them as QPACK_DECODER_STREAM_ERROR closed the
     // connection and dropped in-flight requests (the bug this guards).
-    let mut enc = Encoder::new(256, false);
+    let mut enc = Encoder::new(256, 16, false);
 
     // Section Acknowledgment for a stream with no pending reference.
     assert!(enc.feed_decoder_stream(&[0xC0]).is_ok());
@@ -68,7 +68,7 @@ fn stray_decoder_stream_instructions_are_benign() {
 fn vector_b1_static_name_ref() {
     // RFC 9204 B.1: literal field line with a static name reference. The
     // decoder advertises capacity 0, so the dynamic table is unused.
-    let mut enc = Encoder::new(0, false);
+    let mut enc = Encoder::new(0, 16, false);
     let out = enc.encode_section(0, &[hdr(":path", "/index.html")]);
     assert_eq!(hex(&out.block), "0000510b2f696e6465782e68746d6c");
     assert!(out.encoder_stream.is_empty());
@@ -79,7 +79,7 @@ fn vector_b2_dynamic_post_base() {
     // RFC 9204 B.2: Set Capacity 220, two inserts with static name
     // references, then a field section referencing them post-Base
     // (Required Insert Count = 2, Sign = 1, Delta Base = 1).
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     assert_eq!(hex(&enc.set_capacity(220).unwrap()), "3fbd01");
     let authority = enc
         .insert_with_name_ref(b":authority", b"www.example.com")
@@ -104,7 +104,7 @@ fn vector_b2_dynamic_post_base() {
 #[test]
 fn vector_b3_insert_literal_name() {
     // RFC 9204 B.3: Insert with Literal Name (custom-key/custom-value).
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     enc.set_capacity(220);
     let ins = enc.insert_literal(b"custom-key", b"custom-value").unwrap();
     assert_eq!(
@@ -123,7 +123,7 @@ fn vector_b4_duplicate_and_relative() {
     // RFC 9204 B.4: duplicate entry 2, then an indexed field line
     // relative to Base 4 (Required Insert Count = 4, Sign = 0, Delta
     // Base = 0).
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     enc.set_capacity(220);
     enc.insert_with_name_ref(b":authority", b"www.example.com");
     enc.insert_with_name_ref(b":path", b"/sample/path");
@@ -139,7 +139,7 @@ fn vector_b4_duplicate_and_relative() {
 fn fresh_name_inserted_then_referenced() {
     // A name that matches nothing is inserted with a literal name
     // instruction, then the section references it post-Base.
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     let out = enc.encode_section(0, &[hdr("custom-key", "custom-value")]);
     assert_eq!(
         hex(&out.encoder_stream),
@@ -153,7 +153,7 @@ fn fresh_name_inserted_then_referenced() {
 
 #[test]
 fn indexed_static_full_match() {
-    let mut enc = Encoder::new(0, false);
+    let mut enc = Encoder::new(0, 16, false);
     let out = enc.encode_section(0, &[hdr(":method", "GET")]);
     let idx = static_table::find(b":method", b"GET").unwrap() as u8;
     assert_eq!(hex(&out.block), format!("0000{:02x}", 0xc0 | idx));
@@ -163,7 +163,7 @@ fn indexed_static_full_match() {
 fn relative_ref_from_fixed_base() {
     // Entries inserted beforehand are referenced relative to Base = the
     // insert count; nothing new is inserted, so Sign = 0, Delta = 0.
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     enc.set_capacity(220);
     enc.insert_with_name_ref(b":authority", b"www.example.com");
     enc.insert_with_name_ref(b":path", b"/sample/path");
@@ -184,7 +184,7 @@ fn relative_ref_from_fixed_base() {
 /// download streams" hang.
 #[test]
 fn ack_base_uses_post_base_for_unacknowledged_entry() {
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     enc.set_capacity(220);
     // Insert two entries but never feed the client's decoder stream, so the
     // encoder's known_received stays 0 (nothing acknowledged yet).
@@ -211,7 +211,7 @@ fn ack_base_uses_post_base_for_unacknowledged_entry() {
 
 #[test]
 fn ack_base_uses_relative_for_acknowledged_entry() {
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     enc.set_capacity(220);
     enc.insert_with_name_ref(b":authority", b"www.example.com");
     enc.insert_with_name_ref(b":path", b"/sample/path");
@@ -238,7 +238,7 @@ fn ack_base_uses_relative_for_acknowledged_entry() {
 
 #[test]
 fn huffman_used_when_shorter() {
-    let mut enc = Encoder::new(0, true);
+    let mut enc = Encoder::new(0, 16, true);
     let out = enc.encode_section(
         0,
         &[hdr(":path", "www.example.com/aaaaaaaaaaaaaaaaaaaaaaaaa")],
@@ -258,7 +258,7 @@ fn huffman_used_when_shorter() {
 
 #[test]
 fn sensitive_never_indexed() {
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     let out = enc.encode_section(0, &[hdr("authorization", "Bearer xyz")]);
     // No encoder stream instruction: the field is never stored.
     assert!(out.encoder_stream.is_empty());
@@ -273,7 +273,7 @@ fn insert_skipped_when_it_would_evict_referenced_entry() {
     // references it, and the second field (71 bytes) does not fit
     // without evicting it, so the insert is skipped and the field is
     // sent as a literal name.
-    let mut enc = Encoder::new(100, false);
+    let mut enc = Encoder::new(100, 16, false);
     enc.set_capacity(100);
     enc.insert_with_name_ref(b":authority", b"www.example.com");
     let out = enc.encode_section(
@@ -295,7 +295,7 @@ fn insert_skipped_when_it_would_evict_referenced_entry() {
 
 #[test]
 fn no_duplicate_set_capacity_instruction() {
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     enc.set_capacity(220);
     let out = enc.encode_section(0, &[hdr(":path", "/sample/path")]);
     assert!(out.encoder_stream.is_empty());
@@ -303,7 +303,7 @@ fn no_duplicate_set_capacity_instruction() {
 
 #[test]
 fn empty_section() {
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     let out = enc.encode_section(0, &[]);
     // Prefix only: Required Insert Count 0, Sign 0, Delta Base 0.
     assert_eq!(hex(&out.block), "0000");
@@ -316,7 +316,7 @@ fn static_only_section_announces_zero_ric() {
     // Required Insert Count of 0 even when the dynamic table is
     // non-empty (RFC 9204 Section 2.1.2: it is one larger than the
     // largest referenced absolute index, so 0 when none are referenced).
-    let mut enc = Encoder::new(220, false);
+    let mut enc = Encoder::new(220, 16, false);
     enc.set_capacity(220);
     enc.insert_with_name_ref(b":authority", b"www.example.com");
     let out = enc.encode_section(0, &[hdr(":method", "GET")]);
@@ -398,7 +398,7 @@ fn insert_with_literal_name_survives_strict_decode() {
     // 5-bit prefix with the Huffman flag at bit 5. With Huffman enabled
     // (the production setting), a 4-bit prefix misplaces the flag and
     // corrupts the stream, so a strict decoder cannot recover the name.
-    let mut enc = Encoder::new(220, true);
+    let mut enc = Encoder::new(220, 16, true);
     enc.set_capacity(220);
     let ins = enc
         .insert_literal(b"x-custom-header", b"hello-world")
@@ -413,7 +413,7 @@ fn insert_with_literal_name_survives_strict_decode() {
 #[test]
 fn neqo_ici_roundtrip_repro() {
     use crate::h3::qpack::decoder::Decoder;
-    let mut enc = Encoder::new(4096, false);
+    let mut enc = Encoder::new(4096, 16, false);
     let mut dec = Decoder::new(4096, 16);
     for i in 0..64u64 {
         let name = Bytes::from(format!("x-header-{i}"));
@@ -438,7 +438,7 @@ fn split_decoder_stream_chunk_repro() {
     // (0xFF + 0x01): the 7-bit Stream ID prefix overflows into a
     // continuation byte. QUIC `poll_recv` can deliver these bytes in
     // separate chunks. Feeding the first byte alone must NOT error.
-    let mut enc = Encoder::new(256, false);
+    let mut enc = Encoder::new(256, 16, false);
     enc.encode_section(128, &[hdr("a", "b")]);
     // First byte only — must be tolerated (buffered), not a connection error.
     assert!(
@@ -456,7 +456,7 @@ fn decoder_stream_batch_larger_than_one_instruction_is_accepted() {
     // transport may deliver all of those acknowledgments in a single chunk.
     // The buffer bound applies to one instruction (10 octets), not to the
     // chunk, so a valid batch must not raise QPACK_DECODER_STREAM_ERROR.
-    let mut enc = Encoder::new(256, false);
+    let mut enc = Encoder::new(256, 16, false);
     let mut batch = Vec::new();
     for stream_id in (0..=316u64).step_by(4) {
         integer::encode(&mut batch, stream_id, 7, 0x80);
@@ -470,7 +470,7 @@ fn endless_decoder_stream_continuation_is_rejected() {
     // A prefixed integer is at most 10 octets (RFC 9204 Section 4.1.1).
     // An instruction whose continuation bytes never terminate must be
     // rejected instead of buffered forever.
-    let mut enc = Encoder::new(256, false);
+    let mut enc = Encoder::new(256, 16, false);
     let mut runaway = vec![0x3f]; // `00` + 6-bit increment prefix, all ones
     runaway.extend_from_slice(&[0x80; 10]);
     assert_eq!(
@@ -483,7 +483,7 @@ fn endless_decoder_stream_continuation_is_rejected() {
 fn insert_with_literal_name_huffman_flag_at_bit_five() {
     // Byte-level check: with Huffman on, the H flag of an Insert With
     // Literal Name must sit at bit 5 (0x20), not bit 4 (0x10).
-    let mut enc = Encoder::new(220, true);
+    let mut enc = Encoder::new(220, 16, true);
     enc.set_capacity(220);
     let ins = enc.insert_literal(b"x-custom-header", b"hello").unwrap();
     let pos = ins
@@ -503,7 +503,7 @@ fn insert_with_literal_name_huffman_flag_at_bit_five() {
 /// 126, more than was inserted, and the instruction a decoder stream error.
 #[test]
 fn decoder_stream_integers_past_the_prefix_are_read_whole() {
-    let mut enc = Encoder::new(4096, false);
+    let mut enc = Encoder::new(4096, 16, false);
     let _ = enc.set_capacity(4096);
     let fields: Vec<_> = (0..70).map(|i| hdr(&format!("x-field-{i}"), "v")).collect();
     let _ = enc.encode_section(200, &fields);
@@ -519,6 +519,35 @@ fn decoder_stream_integers_past_the_prefix_are_read_whole() {
         assert!(
             enc.pending_refs.iter().all(|(id, _)| *id != 200),
             "the acknowledgment freed nothing"
+        );
+    }
+}
+
+#[test]
+fn encoder_should_not_block_too_much() {
+    // The encoder must not block a section that could be encoded with
+    // the current dynamic table state. A blocked section is a bug in
+    // the encoder's logic, not a network condition.
+    let mut enc = Encoder::new(2048, 8, false);
+    enc.set_capacity(2048);
+
+    for i in 0..8 {
+        let fields: Vec<_> = vec![hdr(&format!("x-field-{i}"), "v")];
+        let out = enc.encode_section(i, &fields);
+        assert!(
+            !out.encoder_stream.is_empty(),
+            "nothing in the encoder stream, but there should be insert instructions \
+             (dynamic table)"
+        );
+    }
+
+    // These would overflow the stream block limit, so it should be literals
+    for i in 8..16 {
+        let fields: Vec<_> = vec![hdr(&format!("x-field-{i}"), "v")];
+        let out = enc.encode_section(i, &fields);
+        assert!(
+            out.encoder_stream.is_empty(),
+            "unexpected insert instructions for dynamic table in the encoder stream"
         );
     }
 }

@@ -4,6 +4,7 @@
 
 **Not yet released**
 
+- Improved HTTP/3 correctness related to QPACK decoder stream leftover bytes ([GitHub issue](https://github.com/ferronweb/ferron/issues/997))
 - Improved HTTP/3 performance and correctness related to encoder-stream writes ([GitHub issue](https://github.com/ferronweb/ferron/issues/997))
 
 ## `zincio-http` 0.4.15

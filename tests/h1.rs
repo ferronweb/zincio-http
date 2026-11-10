@@ -1260,3 +1260,58 @@ mod zerocopy {
             .await
     }
 }
+
+#[tokio::test]
+async fn test_upgrade_downcast_gives_back_the_stream_and_what_was_read() {
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let (client_io, server_io) = tokio::io::duplex(4096);
+
+            let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
+            let (got_tx, got_rx) = tokio::sync::oneshot::channel();
+            let got_tx = std::cell::Cell::new(Some(got_tx));
+            let server_task = tokio::task::spawn_local(server.handle(move |mut req| {
+                let upgrade = prepare_upgrade(&mut req);
+                let got_tx = got_tx.take();
+                async move {
+                    tokio::task::spawn_local(async move {
+                        let upgraded = upgrade.unwrap().await.unwrap();
+                        // Not the stream's type: the upgrade comes back unchanged.
+                        let upgraded = upgraded.downcast::<std::io::Cursor<Vec<u8>>>().unwrap_err();
+                        let (mut io, read) = upgraded
+                            .downcast::<tokio::io::DuplexStream>()
+                            .ok()
+                            .expect("the stream the connection was made with");
+                        io.write_all(b"raw").await.unwrap();
+                        let _ = got_tx.unwrap().send(read);
+                    });
+                    Ok::<_, http::Error>(
+                        http::Response::builder()
+                            .status(101)
+                            .header("Upgrade", "echo")
+                            .header("Connection", "upgrade")
+                            .body(Empty::new())
+                            .unwrap(),
+                    )
+                }
+            }));
+
+            let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+            client_writer
+                .write_all(
+                    b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: upgrade\r\nUpgrade: echo\r\n\r\nearly",
+                )
+                .await
+                .unwrap();
+            let read = got_rx.await.unwrap();
+            assert_eq!(read.as_deref(), Some(&b"early"[..]));
+            let mut response = vec![0u8; 256];
+            let mut n = 0;
+            while !response[..n].ends_with(b"raw") {
+                n += client_reader.read(&mut response[n..]).await.unwrap();
+            }
+            assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+            server_task.await.unwrap().unwrap();
+        })
+        .await
+}

@@ -1,8 +1,8 @@
 # `zincio-http` change log
 
-## `zincio-http` UNRELEASED
+## `zincio-http` 0.4.16
 
-**Not yet released**
+**Released in November 11, 2026**
 
 - Added proper support for extended CONNECT for HTTP/2 ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/53))
 - Added proper support for extended CONNECT for HTTP/3.

@@ -39,6 +39,9 @@ use super::date::DateCache;
 use super::error::Reason;
 use super::hpack::{Decoder as HpackDecoder, Encoder, Header as HpackHeader, HpackError};
 use super::sanitize_response;
+
+/// How long a closing connection reads on for the peer's close ([`Connection::linger`]).
+const LINGER: Duration = Duration::from_secs(2);
 use super::stream::{
     BodyMsg, H2Body, MalformedRequest, ParsedRequest, StreamDriver, StreamEntry, StreamMsg,
 };
@@ -274,6 +277,9 @@ pub struct Connection<Io> {
     /// only drain already-open streams until they finish or the drain
     /// window elapses (RFC 9113 Section 6.8).
     graceful: bool,
+    /// The peer sent GOAWAY: it opens no more streams, and the connection
+    /// closes once the ones it has are done (RFC 9113 Section 6.8).
+    peer_goaway: bool,
     /// Last stream id advertised in the graceful-shutdown GOAWAY; peers
     /// must not open streams beyond it.
     graceful_last_stream: u32,
@@ -341,6 +347,7 @@ where
             highest_stream_id: 0,
             closing: false,
             graceful: false,
+            peer_goaway: false,
             graceful_last_stream: 0,
             shutdown: None,
             date_cache: Arc::new(DateCache::new()),
@@ -485,8 +492,8 @@ where
 
         let mut buf = [0u8; 8192];
         let mut wake_rx_drain = Vec::new();
-        let mut peer_goaway = false;
-        while !peer_goaway && !(self.graceful && self.streams.is_empty()) {
+        let mut close = false;
+        while !close && !((self.graceful || self.peer_goaway) && self.streams.is_empty()) {
             let wake_recv = wake_rx.recv().fuse();
             let read = tokio::io::AsyncReadExt::read(&mut self.io, &mut buf).fuse();
             // Graceful-shutdown signal: never fires without a token. The
@@ -558,7 +565,7 @@ where
                         break; // peer closed; nothing more to say
                     }
                     self.decoder.extend(&buf[..n]);
-                    peer_goaway = self.process_frames(&request_fn).await?;
+                    close = self.process_frames(&request_fn).await?;
                     self.drain_outbound();
                     self.flush().await?;
                 }
@@ -591,7 +598,24 @@ where
         if let Some(error) = self.connection_error.take() {
             return Err(error);
         }
+        if self.peer_goaway || self.graceful {
+            self.linger().await;
+        }
         Ok(())
+    }
+
+    /// Ends a connection the peer may still be writing to (after a GOAWAY
+    /// either way): our side closes, then what the peer still sends is read
+    /// and dropped until it closes too, for [`LINGER`] at most. Closing with
+    /// unread data makes the kernel reset the connection, and the peer may
+    /// then lose our last frames (nginx's lingering close).
+    async fn linger(&mut self) {
+        let _ = tokio::io::AsyncWriteExt::shutdown(&mut self.io).await;
+        let mut buf = [0u8; 4096];
+        let _ = zincio::time::timeout(LINGER, async {
+            while let Ok(1..) = tokio::io::AsyncReadExt::read(&mut self.io, &mut buf).await {}
+        })
+        .await;
     }
 
     /// Reads the 24-octet client preface.
@@ -625,8 +649,8 @@ where
     }
 
     /// Decodes and handles every frame currently buffered. Returns
-    /// `Ok(true)` when the connection should end (peer GOAWAY or an
-    /// error we answered with GOAWAY).
+    /// `Ok(true)` when the connection should end at once (an error we
+    /// answered with GOAWAY); a peer's GOAWAY only sets `peer_goaway`.
     #[inline]
     async fn process_frames<F, Fut, ResB, ResBE, ResE>(
         &mut self,
@@ -668,7 +692,9 @@ where
                     self.writer.write_ping_ack(&mut self.out, &payload);
                 }
                 Frame::Ping { ack: true, .. } => {}
-                Frame::GoAway { .. } => return Ok(true),
+                // Read on: what came with it is answered, and the streams it
+                // leaves run to their end.
+                Frame::GoAway { .. } => self.peer_goaway = true,
                 Frame::Headers {
                     stream_id,
                     end_stream,

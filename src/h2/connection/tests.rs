@@ -813,6 +813,27 @@ fn complete_field_block_within_limit_is_not_reset() {
 }
 
 #[test]
+fn frames_after_a_peer_goaway_are_answered_before_closing() {
+    // RFC 9113 Section 6.8: a GOAWAY stops new streams, not the connection.
+    // What came with it is still read and answered, so the connection does
+    // not close on unread data (which the kernel turns into a reset).
+    let mut script = client_script(|_, _| {});
+    let writer = FrameWriter::new(DEFAULT_MAX_FRAME_SIZE);
+    writer.write_goaway(&mut script, 0, 0x00, b"bye");
+    writer.write_ping(&mut script, b"h2spec  ");
+
+    let reply = run_connection(CLIENT_PREFACE, &script, Some(Duration::from_secs(5)), None);
+    let decoded = decode_frames(&reply);
+    assert!(
+        decoded.iter().any(|f| matches!(
+            f,
+            Frame::Ping { ack: true, payload } if payload == b"h2spec  "
+        )),
+        "{decoded:?}"
+    );
+}
+
+#[test]
 fn data_past_the_content_length_is_a_stream_error_at_once() {
     // RFC 9113 Section 8.1.1: the DATA frames must add up to `content-length`.
     // Excess is malformed as soon as it arrives, whether or not the handler

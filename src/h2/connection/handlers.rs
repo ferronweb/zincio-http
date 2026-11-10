@@ -377,6 +377,7 @@ where
             early_hints_rx,
             send_continue,
             send_continue_body,
+            parsed.is_connect,
             is_head,
             upgrade,
         ));

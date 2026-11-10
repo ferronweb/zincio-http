@@ -4,6 +4,7 @@
 
 **Not yet released**
 
+- Added `Upgraded::downcast` function for giving back connection's own I/O type after an HTTP upgrade ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/54))
 - Improved HTTP/3 correctness related to QPACK decoder stream leftover bytes ([GitHub issue](https://github.com/ferronweb/ferron/issues/997))
 - Improved HTTP/3 correctness related to QPACK encoder stream handling for streams that would block ([GitHub issue](https://github.com/ferronweb/ferron/issues/997))
 - Improved HTTP/3 performance and correctness related to encoder-stream writes ([GitHub issue](https://github.com/ferronweb/ferron/issues/997))

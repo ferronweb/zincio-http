@@ -48,12 +48,12 @@ fn websocket_over_h2_reaches_the_handler_and_tunnels_both_ways() {
                         let _ = tokio::io::copy(&mut reader, &mut writer).await;
                     });
 
-                    return Ok::<_, std::io::Error>(
+                    Ok::<_, std::io::Error>(
                         Response::builder()
                             .status(StatusCode::SWITCHING_PROTOCOLS)
                             .body(http_body_util::Empty::new())
                             .unwrap(),
-                    );
+                    )
                 })
                 .await
             });

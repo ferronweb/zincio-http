@@ -2,9 +2,7 @@
 //!
 //! Consumption: the HTTP/3 layer drives the decoder per connection (it feeds
 //! encoder stream data and decoded field sections, and drains the decoder
-//! stream); until that lands, the whole module is dead in non-test builds,
-//! which is why `dead_code` is expected here. It errors again once the
-//! decoder is used, reminding us to remove the expectation.
+//! stream).
 //!
 //! The decoder materializes the shared dynamic table (Section 4.2) from the
 //! encoder stream (Section 4.3): every instruction is parsed and mirrored as
@@ -28,7 +26,6 @@
 //! stream's cumulative decoded size over the advertised
 //! `SETTINGS_MAX_FIELD_SECTION_SIZE` are rejected (RFC 9114 Section
 //! 7.2.4.1).
-#![expect(dead_code)]
 
 use std::collections::VecDeque;
 
@@ -49,28 +46,37 @@ const INSERT_COUNT_INCREMENT: u8 = 0x00;
 
 // Encoder instruction patterns (RFC 9204 4.3), mirrored from the encoder.
 /// `001` + 5-bit capacity: Set Dynamic Table Capacity (4.3.1).
+#[allow(dead_code)]
 const SET_CAPACITY: u8 = 0b0010_0000;
 /// `1 T` + 6-bit name index: Insert with Name Reference (4.3.2).
+#[allow(dead_code)]
 const INSERT_WITH_NAME_REF: u8 = 0b1000_0000;
 /// `01` + H + 5-bit name length: Insert with Literal Name (4.3.3).
+#[allow(dead_code)]
 const INSERT_WITH_LITERAL_NAME: u8 = 0b0100_0000;
 /// `000` + 5-bit relative index: Duplicate (4.3.4).
+#[allow(dead_code)]
 const DUPLICATE: u8 = 0b0000_0000;
 
 // Field line patterns (RFC 9204 4.5), mirrored from the encoder.
 /// `1 T` + 6-bit index: Indexed Field Line (4.5.2).
+#[allow(dead_code)]
 const INDEXED: u8 = 0b1000_0000;
 /// `0001` + 4-bit post-Base index: Indexed Field Line with Post-Base Index
 /// (4.5.3).
+#[allow(dead_code)]
 const INDEXED_POST_BASE: u8 = 0b0001_0000;
 /// `01 N T` + 4-bit name index: Literal Field Line with Name Reference
 /// (4.5.4).
+#[allow(dead_code)]
 const LITERAL_NAME_REF: u8 = 0b0100_0000;
 /// `0000 N` + 3-bit post-Base name index: Literal Field Line with Post-Base
 /// Name Reference (4.5.5).
+#[allow(dead_code)]
 const LITERAL_POST_BASE_NAME_REF: u8 = 0b0000_0000;
 /// `001 N` + H + 3-bit name length: Literal Field Line with Literal Name
 /// (4.5.6).
+#[allow(dead_code)]
 const LITERAL_LITERAL_NAME: u8 = 0b0010_0000;
 
 /// The per-field overhead a field list's size includes (RFC 9114 Section

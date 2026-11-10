@@ -962,7 +962,7 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
     }
     if let Some(proto) = protocol
         .as_deref()
-        .and_then(|p| crate::ext::Protocol::from_bytes(p))
+        .and_then(crate::ext::Protocol::from_bytes)
     {
         request.extensions_mut().insert(proto);
     }

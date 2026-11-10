@@ -156,6 +156,7 @@ pub(super) struct UpgradedSendStreamTask {
     inner: Arc<Mutex<RequestStream>>,
     #[allow(clippy::type_complexity)]
     send_fut: Option<Pin<Box<dyn Future<Output = Result<(), StreamError>>>>>,
+    #[allow(clippy::type_complexity)]
     rx_fut: Option<Pin<Box<kanal::ReceiveFuture<'static, Box<[u8]>>>>>,
     rx: kanal::AsyncReceiver<Box<[u8]>>,
     error_tx: Option<oneshot::Sender<std::io::Error>>,

@@ -173,6 +173,7 @@ impl AsyncWrite for H2Upgraded {
 pub(super) struct UpgradedSendStreamTask {
     inner_fut: Option<Pin<Box<kanal::SendFuture<'static, super::stream::StreamMsg>>>>,
     inner: kanal::AsyncSender<super::stream::StreamMsg>,
+    #[allow(clippy::type_complexity)]
     rx_fut: Option<Pin<Box<kanal::ReceiveFuture<'static, Box<[u8]>>>>>,
     rx: kanal::AsyncReceiver<Box<[u8]>>,
     error_tx: Option<oneshot::Sender<std::io::Error>>,

@@ -23,23 +23,37 @@ fn websocket_over_h2_reaches_the_handler_and_tunnels_both_ways() {
                     server_io,
                     Http2Options::default().enable_connect_protocol(true),
                 )
-                .handle(|request: Request<Incoming>| async move {
+                .handle(|mut request: Request<Incoming>| async move {
                     let protocol = request.extensions().get::<Protocol>().cloned();
                     let target = (request.method().clone(), request.uri().clone());
-                    let status = if protocol.as_ref().map(Protocol::as_str) == Some("websocket")
+                    let valid = protocol.as_ref().map(Protocol::as_str) == Some("websocket")
                         && target.0 == Method::CONNECT
                         && target.1.path() == "/chat"
                         && target.1.query() == Some("room=1")
-                        && target.1.host() == Some("example.com")
-                    {
-                        StatusCode::OK
-                    } else {
-                        StatusCode::BAD_REQUEST
-                    };
+                        && target.1.host() == Some("example.com");
                     // An echo: what the client sends comes back as it arrives.
-                    let mut response = Response::new(request.into_body());
-                    *response.status_mut() = status;
-                    Ok::<_, std::io::Error>(response)
+                    if !valid {
+                        return Ok::<_, std::io::Error>(
+                            Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(http_body_util::Empty::new())
+                                .unwrap(),
+                        );
+                    }
+
+                    let upgrade = zincio_http::prepare_upgrade(&mut request);
+                    zincio::spawn(async move {
+                        let upgraded = upgrade.unwrap().await.unwrap();
+                        let (mut reader, mut writer) = tokio::io::split(upgraded);
+                        let _ = tokio::io::copy(&mut reader, &mut writer).await;
+                    });
+
+                    return Ok::<_, std::io::Error>(
+                        Response::builder()
+                            .status(StatusCode::SWITCHING_PROTOCOLS)
+                            .body(http_body_util::Empty::new())
+                            .unwrap(),
+                    );
                 })
                 .await
             });

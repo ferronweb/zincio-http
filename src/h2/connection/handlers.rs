@@ -302,15 +302,23 @@ where
         let send_continue_body = send_continue.then(|| Arc::new(AtomicBool::new(false)));
         let (early_hints, early_hints_rx) = EarlyHints::new_lazy();
 
-        // A tunnel's request body is what the client sends through it
-        // (Section 8.5).
-        let mut request = Request::new(if let Some(body_rx) = body_rx {
-            Incoming::H2(H2Body::new(body_rx, send_continue_body.clone()))
+        let (mut request, upgrade) = if let Some(body_rx) = body_rx {
+            if parsed.is_connect {
+                (Request::new(Incoming::Empty), Some(body_rx))
+            } else {
+                (
+                    Request::new(Incoming::H2(H2Body::new(
+                        body_rx,
+                        send_continue_body.clone(),
+                    ))),
+                    None,
+                )
+            }
         } else {
             // The request ended with HEADERS, so no body frames can
             // arrive; expose an empty body without a channel for it.
-            Incoming::Empty
-        });
+            (Request::new(Incoming::Empty), None)
+        };
         *request.method_mut() = parsed.method;
         *request.uri_mut() = parsed.uri;
         *request.version_mut() = http::Version::HTTP_2;
@@ -319,6 +327,17 @@ where
         if let Some(protocol) = parsed.protocol {
             request.extensions_mut().insert(protocol);
         }
+
+        let upgrade = if let Some(recv_stream) = upgrade {
+            let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
+            let upgrade = crate::Upgrade::new(upgrade_rx);
+            let upgraded = upgrade.upgraded.clone();
+            request.extensions_mut().insert(upgrade);
+            Some((upgrade_tx, upgraded, recv_stream))
+        } else {
+            None
+        };
+
         if end_stream && parsed.content_length.is_some_and(|cl| cl != 0) {
             // A request that ended without delivering its declared
             // body: stream error (RFC 9113 Section 8.1.2.6).
@@ -360,6 +379,7 @@ where
             send_continue_body,
             parsed.is_connect,
             is_head,
+            upgrade,
         ));
     }
 

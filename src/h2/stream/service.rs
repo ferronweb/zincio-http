@@ -9,6 +9,8 @@ enum ServicePoll<ResB> {
     Pending,
     /// The final response is ready to be piped to the connection.
     Body(ResB),
+    /// The stream is upgraded
+    Upgrade(super::super::upgrade::UpgradedSendStreamTask),
 }
 
 pin_project! {
@@ -55,6 +57,11 @@ pin_project! {
             early_hints_open: bool,
             extended_connect: bool,
             is_head: bool,
+            upgrade: Option<(
+                oneshot::Sender<crate::Upgraded>,
+                Arc<AtomicBool>,
+                kanal::AsyncReceiver<super::BodyMsg>,
+            )>,
         },
         Body {
             headers: Option<http::response::Parts>,
@@ -62,6 +69,10 @@ pin_project! {
             body: ResB,
             body_end: bool,
             first_frame: Option<http_body::Frame<Bytes>>,
+        },
+        Upgrade {
+            #[pin]
+            task: super::super::upgrade::UpgradedSendStreamTask,
         },
     }
 }
@@ -79,6 +90,11 @@ impl<Fut, ResB> StreamDriver<Fut, ResB> {
         send_continue_body: Option<Arc<AtomicBool>>,
         extended_connect: bool,
         is_head: bool,
+        upgrade: Option<(
+            oneshot::Sender<crate::Upgraded>,
+            Arc<AtomicBool>,
+            kanal::AsyncReceiver<super::BodyMsg>,
+        )>,
     ) -> Self {
         Self {
             msg_tx,
@@ -100,6 +116,7 @@ impl<Fut, ResB> StreamDriver<Fut, ResB> {
                 early_hints_open: true,
                 extended_connect,
                 is_head,
+                upgrade,
             },
         }
     }
@@ -168,6 +185,7 @@ where
                     early_hints_open,
                     extended_connect,
                     is_head,
+                    upgrade,
                 } => {
                     match Self::poll_service(
                         this.msg_tx,
@@ -185,6 +203,7 @@ where
                         early_hints_open,
                         *extended_connect,
                         *is_head,
+                        upgrade,
                         cx,
                     ) {
                         ServicePoll::Done => {}
@@ -202,6 +221,10 @@ where
                                 body_end: false,
                                 first_frame: None,
                             });
+                            continue;
+                        }
+                        ServicePoll::Upgrade(task) => {
+                            this.state.set(StreamDriverState::Upgrade { task });
                             continue;
                         }
                     }
@@ -227,6 +250,10 @@ where
                         Poll::Pending => return Poll::Pending,
                     }
                 }
+                StreamDriverProj::Upgrade { task } => match task.poll(cx) {
+                    Poll::Ready(()) => {}
+                    Poll::Pending => return Poll::Pending,
+                },
             }
             // Terminal message: the outer drain loop delivers it before
             // the task exits, so the connection always sees Closed.
@@ -265,10 +292,28 @@ where
         early_hints_open: &mut bool,
         extended_connect: bool,
         is_head: bool,
+        upgrade: &mut Option<(
+            oneshot::Sender<crate::Upgraded>,
+            Arc<AtomicBool>,
+            kanal::AsyncReceiver<super::BodyMsg>,
+        )>,
         cx: &mut Context<'_>,
     ) -> ServicePoll<ResB> {
         loop {
             if *response_done {
+                if let Some((upgrade_tx, upgraded, recv_stream)) = upgrade.take() {
+                    if upgraded.load(Ordering::Relaxed) {
+                        let (upgraded, task) = super::super::upgrade::pair(
+                            recv_stream,
+                            msg_tx.clone(),
+                            reset_rx.clone(),
+                            wake_tx.clone(),
+                        );
+                        let _ = upgrade_tx.send(crate::Upgraded::new(upgraded, None));
+                        return ServicePoll::Upgrade(task);
+                    }
+                }
+
                 match body.take() {
                     Some(body) => return ServicePoll::Body(body),
                     None => return ServicePoll::Done,
@@ -302,8 +347,9 @@ where
                     }
                     *continue_sent = true;
                 }
-                let (response_is_end_stream, parts, response_body) = if !is_head {
-                    let response_is_end_stream = response.body().is_end_stream();
+                let (response_is_end_stream, mut parts, response_body) = if !is_head {
+                    let response_is_end_stream =
+                        response.body().is_end_stream() && !extended_connect;
                     let (parts, response_body) = response.into_parts();
                     (response_is_end_stream, parts, Some(response_body))
                 } else {
@@ -311,6 +357,10 @@ where
                     (true, parts, None)
                 };
 
+                if extended_connect && parts.status == StatusCode::SWITCHING_PROTOCOLS {
+                    // HTTP/2 upgrades use 200 OK, not 101 Switching Protocols
+                    parts.status = StatusCode::OK;
+                }
                 if response_is_end_stream || extended_connect {
                     match Self::send(
                         msg_tx,

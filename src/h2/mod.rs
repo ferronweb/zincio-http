@@ -14,6 +14,7 @@ pub mod error;
 pub mod hpack;
 pub mod options;
 mod stream;
+mod upgrade;
 
 pub(crate) use stream::H2Body;
 

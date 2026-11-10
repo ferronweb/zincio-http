@@ -4,6 +4,7 @@
 
 **Not yet released**
 
+- Added proper support for extended CONNECT for HTTP/2 ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/53))
 - Added support for HTTP/2 stream header read timeout (default is 30 seconds, same as HTTP/1.x).
 - Added support for HTTP/3 stream header read timeout (default is 30 seconds, same as HTTP/1.x).
 - Added `Upgraded::downcast` function for giving back connection's own I/O type after an HTTP upgrade ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/54))

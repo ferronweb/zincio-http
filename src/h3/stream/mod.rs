@@ -282,6 +282,7 @@ pub(crate) struct RequestStream {
     stream_id: u64,
     frame_decoder: FrameDecoder,
     shared: Arc<SharedCodecs>,
+    enable_connect: bool,
 
     // Receive state.
     awaiting_headers: bool,
@@ -305,7 +306,11 @@ impl RequestStream {
     /// ID, used to correlate QPACK state (blocked field sections, section
     /// acknowledgements).
     #[inline]
-    pub(crate) fn new(stream: Box<dyn BidiStream>, shared: Arc<SharedCodecs>) -> Self {
+    pub(crate) fn new(
+        stream: Box<dyn BidiStream>,
+        shared: Arc<SharedCodecs>,
+        enable_connect: bool,
+    ) -> Self {
         let stream_id = stream.id();
         Self {
             stream,
@@ -314,6 +319,7 @@ impl RequestStream {
                 shared.local_max_field_section_size,
             ),
             shared,
+            enable_connect,
             awaiting_headers: true,
             headers_blocked: false,
             recv_data: VecDeque::new(),
@@ -352,7 +358,7 @@ impl RequestStream {
             if let Some(section) = section {
                 self.headers_blocked = false;
                 self.awaiting_headers = false;
-                return Poll::Ready(build_request(section.headers).map(Some));
+                return Poll::Ready(build_request(section.headers, self.enable_connect).map(Some));
             }
             return Poll::Pending;
         }
@@ -366,7 +372,7 @@ impl RequestStream {
                 Poll::Ready(Ok(None))
             }
             Some(Frame::Headers(block)) => match self.decode_block(&block) {
-                Ok(Some(headers)) => match build_request(headers) {
+                Ok(Some(headers)) => match build_request(headers, self.enable_connect) {
                     Ok(request) => {
                         self.awaiting_headers = false;
                         Poll::Ready(Ok(Some(request)))
@@ -888,7 +894,10 @@ fn now() -> u64 {
 ///   extended CONNECT; a plain CONNECT must not carry `:scheme`/`:path`);
 /// - `:protocol` is only valid on CONNECT requests (RFC 9220).
 #[inline]
-fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamError> {
+fn build_request(
+    headers: Vec<(Bytes, Bytes)>,
+    enable_connect: bool,
+) -> Result<Request<()>, StreamError> {
     let mut method = None;
     let mut scheme = None;
     let mut authority = None;
@@ -928,8 +937,9 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
         .map_err(|_| StreamError::Message)?;
     let connect = method == Method::CONNECT;
     let extended = protocol.is_some();
-    if extended && !connect {
+    if extended && (!connect || !enable_connect) {
         // RFC 9220 Section 3: `:protocol` only in CONNECT requests.
+        // This would indicate an extended CONNECT request.
         return Err(StreamError::Message);
     }
     if connect {

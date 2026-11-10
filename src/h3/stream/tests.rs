@@ -182,7 +182,7 @@ fn full_request_exchange() {
     let mut stream = MockBidi::new(11);
     stream.feed(&wire);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared.clone());
+    let mut request = RequestStream::new(Box::new(stream), shared.clone(), false);
 
     let mut cx = cx();
     let req = match request.poll_headers(&mut cx) {
@@ -233,7 +233,7 @@ fn request_without_body_is_finished_by_fin() {
     let mut stream = MockBidi::new(13);
     stream.feed(&wire);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     let req = match request.poll_headers(&mut cx) {
@@ -251,7 +251,7 @@ fn data_before_headers_is_frame_unexpected() {
     Frame::Data(Bytes::from_static(b"x")).encode(&mut wire);
     let mut stream = MockBidi::new(15);
     stream.feed(&wire);
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     let result = request.poll_headers(&mut cx);
@@ -277,7 +277,7 @@ fn control_frames_on_request_stream_are_frame_unexpected() {
         frame.encode(&mut wire);
         let mut stream = MockBidi::new(17);
         stream.feed(&wire);
-        let mut request = RequestStream::new(Box::new(stream), shared.clone());
+        let mut request = RequestStream::new(Box::new(stream), shared.clone(), false);
         let mut cx = cx();
         let result = request.poll_headers(&mut cx);
         assert!(
@@ -294,7 +294,7 @@ fn truncated_frame_is_frame_error() {
     // HEADERS frame with length 5 but no payload.
     stream.feed(&[0x01, 0x05]);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     let result = request.poll_headers(&mut cx);
@@ -325,7 +325,7 @@ fn empty_body_with_trailers() {
     let mut stream = MockBidi::new(21);
     stream.feed(&wire);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     assert!(request.poll_headers(&mut cx).is_ready());
@@ -361,7 +361,7 @@ fn trailers_with_pseudo_headers_are_message_error() {
     let mut stream = MockBidi::new(23);
     stream.feed(&wire);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     assert!(request.poll_headers(&mut cx).is_ready());
@@ -393,7 +393,7 @@ fn known_frame_after_trailers_is_frame_unexpected() {
     let mut stream = MockBidi::new(25);
     stream.feed(&wire);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     assert!(request.poll_headers(&mut cx).is_ready());
@@ -432,7 +432,7 @@ fn unknown_frames_after_trailers_are_ignored() {
     let mut stream = MockBidi::new(27);
     stream.feed(&wire);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     assert!(request.poll_headers(&mut cx).is_ready());
@@ -462,7 +462,7 @@ fn headers_blocked_then_unblocked_by_encoder_stream() {
     let mut stream = MockBidi::new(33);
     stream.feed(&wire);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared.clone());
+    let mut request = RequestStream::new(Box::new(stream), shared.clone(), false);
 
     let mut cx = cx();
     // The encoder stream instructions have not arrived yet: the
@@ -508,6 +508,7 @@ fn send_response_encodes_headers_and_queue_encoder_stream() {
     let mut request = RequestStream::new(
         Box::new(MockBidi::with_sink(41, sink.clone())),
         shared.clone(),
+        false,
     );
 
     let mut headers = HeaderMap::new();
@@ -543,7 +544,7 @@ fn send_response_encodes_headers_and_queue_encoder_stream() {
 fn send_data_writes_data_frame() {
     let shared = shared_with_encoder();
     let stream = MockBidi::new(43);
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
     let mut cx = cx();
     let result = request.poll_send_data(&mut cx, Bytes::from_static(b"abc"));
     assert!(result.is_ready());
@@ -554,7 +555,7 @@ fn send_data_writes_data_frame() {
 fn send_trailers_after_response() {
     let shared = shared_with_encoder();
     let stream = MockBidi::new(45);
-    let mut request = RequestStream::new(Box::new(stream), shared.clone());
+    let mut request = RequestStream::new(Box::new(stream), shared.clone(), false);
     let mut cx = cx();
 
     let mut headers = HeaderMap::new();
@@ -577,7 +578,7 @@ fn send_trailers_after_response() {
 fn response_before_peer_settings_is_message_error() {
     let shared = Arc::new(SharedCodecs::new(&local_settings()));
     let stream = MockBidi::new(47);
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
     let mut cx = cx();
     let headers = HeaderMap::new();
     let result = request.poll_send_response(&mut cx, StatusCode::OK, &headers);
@@ -594,7 +595,7 @@ fn response_over_peer_field_section_limit() {
     *shared.peer_max_field_section_size.lock() = Some(10);
     let shared = Arc::new(shared);
     let stream = MockBidi::new(49);
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
     let mut cx = cx();
 
     let mut headers = HeaderMap::new();
@@ -613,7 +614,7 @@ fn response_over_peer_field_section_limit() {
 fn duplicate_response_is_message_error() {
     let shared = shared_with_encoder();
     let stream = MockBidi::new(51);
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
     let mut cx = cx();
     let headers = HeaderMap::new();
     assert!(matches!(
@@ -647,7 +648,7 @@ fn missing_method_is_message_error() {
     Frame::Headers(section.block).encode(&mut wire);
     let mut stream = MockBidi::new(53);
     stream.feed(&wire);
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     let result = request.poll_headers(&mut cx);
@@ -680,7 +681,7 @@ fn unknown_pseudo_header_is_message_error() {
     Frame::Headers(section.block).encode(&mut wire);
     let mut stream = MockBidi::new(55);
     stream.feed(&wire);
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     let result = request.poll_headers(&mut cx);
@@ -714,7 +715,7 @@ fn pseudo_header_after_regular_is_message_error() {
     Frame::Headers(section.block).encode(&mut wire);
     let mut stream = MockBidi::new(57);
     stream.feed(&wire);
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     let result = request.poll_headers(&mut cx);
@@ -748,7 +749,7 @@ fn connect_request_shape() {
     Frame::Headers(section.block).encode(&mut wire);
     let mut stream = MockBidi::new(59);
     stream.feed(&wire);
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx1 = cx();
     let req = match request.poll_headers(&mut cx1) {
@@ -791,7 +792,7 @@ fn connect_request_shape() {
     Frame::Headers(section.block).encode(&mut wire);
     let mut stream = MockBidi::new(61);
     stream.feed(&wire);
-    let mut request = RequestStream::new(Box::new(stream), shared.clone());
+    let mut request = RequestStream::new(Box::new(stream), shared.clone(), true);
     let mut cx2 = cx();
     let req2 = match request.poll_headers(&mut cx2) {
         Poll::Ready(Ok(Some(request))) => request,
@@ -826,7 +827,7 @@ fn connect_with_path_is_message_error() {
     Frame::Headers(section.block).encode(&mut wire);
     let mut stream = MockBidi::new(63);
     stream.feed(&wire);
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     let result = request.poll_headers(&mut cx);
@@ -876,7 +877,10 @@ fn build_request_rejects_more_headers_than_the_header_map_holds() {
     for i in 0..30_000 {
         headers.push((Bytes::from(format!("x{i:05}")), Bytes::from_static(b"v")));
     }
-    assert!(matches!(build_request(headers), Err(StreamError::Message)));
+    assert!(matches!(
+        build_request(headers, false),
+        Err(StreamError::Message)
+    ));
 }
 
 #[test]
@@ -933,7 +937,7 @@ fn oversized_trailer_section_is_rejected() {
     let mut stream = MockBidi::new(22);
     stream.feed(&wire);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared);
+    let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
     assert!(request.poll_headers(&mut cx).is_ready());

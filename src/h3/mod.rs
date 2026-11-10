@@ -887,6 +887,7 @@ where
             let send_continue_response = options.send_continue_response;
             let send_date_header = options.send_date_header;
             let header_read_timeout = options.header_read_timeout;
+            let enable_connect_protocol = options.local_settings.enable_connect_protocol;
 
             // The QUIC handshake may not be complete yet (0-RTT); wait for
             // it, bounded by the handshake timeout. Server-side QUIC
@@ -1157,14 +1158,21 @@ where
                             {
                                 // A request after our GOAWAY: reject it
                                 // (RFC 9114 Section 5.2).
-                                let mut rejected = RequestStream::new(stream, shared.clone());
+                                let mut rejected = RequestStream::new(
+                                    stream,
+                                    shared.clone(),
+                                    enable_connect_protocol,
+                                );
                                 let _ = rejected.poll_reset(cx, H3_REQUEST_REJECTED);
                             } else {
                                 let (end_tx, end_rx) = oneshot::async_channel();
                                 ongoing.push(end_rx);
-                                let request_stream = Arc::new(tokio::sync::Mutex::new(
-                                    RequestStream::new(stream, shared.clone()),
-                                ));
+                                let request_stream =
+                                    Arc::new(tokio::sync::Mutex::new(RequestStream::new(
+                                        stream,
+                                        shared.clone(),
+                                        enable_connect_protocol,
+                                    )));
                                 let request_fn = request_fn.clone();
                                 let date_cache = date_cache.clone();
                                 let shared = shared.clone();

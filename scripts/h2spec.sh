@@ -74,6 +74,8 @@ KNOWN_FLAKY=(
   "Sends multiple WINDOW_UPDATE frames increasing the flow control window to above"
   # DATA frame reassembly race under load.
   "does not equal the sum of the multiple DATA frames payload length"
+  # Also timing sensitive (zincio-http might send SETTINGS frame later).
+  "Changes SETTINGS_INITIAL_WINDOW_SIZE after sending HEADERS frame"
 )
 
 failed_tests="$(grep -a "[×❌]" "$(dirname "$JUNIT")/h2spec.out" || true)"

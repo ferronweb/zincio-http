@@ -410,7 +410,11 @@ where
                     StreamDataState::Bad
                 } else {
                     entry.data_sum += data.len() as u64;
-                    if !entry.send_body(BodyMsg::Data(data)).await {
+                    if entry.content_length.is_some_and(|cl| entry.data_sum > cl) {
+                        // Malformed at once (RFC 9113 Section 8.1.1), before the
+                        // handler, which may stop reading at the declared length.
+                        StreamDataState::TooLong
+                    } else if !entry.send_body(BodyMsg::Data(data)).await {
                         StreamDataState::Gone
                     } else {
                         StreamDataState::Ok
@@ -438,6 +442,7 @@ where
                     .write_reset(&mut self.out, stream_id, Reason::StreamClosed.code());
             }
             StreamDataState::Bad => self.stream_error(stream_id, Reason::StreamClosed),
+            StreamDataState::TooLong => self.stream_error(stream_id, Reason::ProtocolError),
             StreamDataState::Gone => {
                 self.mark_closed(stream_id);
                 self.streams.remove(&stream_id);

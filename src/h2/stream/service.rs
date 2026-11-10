@@ -3,6 +3,8 @@ use super::*;
 enum ServicePoll<ResB> {
     /// The stream task is done (response fully handed over).
     Done,
+    /// The handler failed: nothing answers the stream, so it is reset.
+    Failed,
     /// Waiting on a response, early hints, or peer reset.
     Pending,
     /// The final response is ready to be piped to the connection.
@@ -186,6 +188,11 @@ where
                         cx,
                     ) {
                         ServicePoll::Done => {}
+                        // Queued, so the connection sees it before the terminal
+                        // `Closed` and drops the stream.
+                        ServicePoll::Failed => this.queue.push_back(StreamMsg::Reset {
+                            error_code: crate::h2::error::Reason::InternalError.code(),
+                        }),
                         ServicePoll::Pending => return Poll::Pending,
                         ServicePoll::Body(body) => {
                             let headers = headers.take();
@@ -269,9 +276,11 @@ where
             }
             if let Poll::Ready(result) = response_fut.as_mut().poll(cx) {
                 let Ok(response) = result else {
-                    // Handler error: the stream ends without a reply.
+                    // Handler error: no reply, so the stream is reset (as hyper
+                    // does); left alone, the client would wait on it and the
+                    // connection keep it for good.
                     *response_done = true;
-                    continue;
+                    return ServicePoll::Failed;
                 };
                 if *send_continue && !*continue_sent {
                     if !response.status().is_client_error() && !response.status().is_server_error()

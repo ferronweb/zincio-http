@@ -184,6 +184,7 @@ fuzz_target!(|data: &[u8]| {
 
     let options = Http3Options::default()
         .handshake_timeout(None)
+        .header_read_timeout(None)
         .accept_timeout(None);
 
     let http3 = Http3::new(conn, options);

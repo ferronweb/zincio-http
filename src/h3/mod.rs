@@ -421,6 +421,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     send_date_header: bool,
     conn_state: Arc<parking_lot::Mutex<ConnResetState>>,
     stream_error_callback: Option<StreamErrorCallback>,
+    header_timeout: Option<std::time::Duration>,
 ) where
     F: Fn(Request<Incoming>) -> Fut,
     Fut: std::future::Future<Output = Result<Response<ResB>, ResE>>,
@@ -441,7 +442,31 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     // Read the request.
     let request_headers = {
         let mut guard = stream.lock().await;
-        std::future::poll_fn(|cx| guard.poll_headers(cx)).await
+        let poll_headers = std::future::poll_fn(|cx| guard.poll_headers(cx));
+        if let Some(timeout) = header_timeout {
+            match zincio::time::timeout(timeout, poll_headers).await {
+                Ok(result) => result,
+                Err(_) => {
+                    report(
+                        &stream_error_callback,
+                        stream_id,
+                        format_args!("stream header read timeout"),
+                    );
+                    let mut guard = stream.lock().await;
+                    let code = H3Error::RequestCancelled.code();
+                    let _ = std::future::poll_fn(|cx| guard.poll_reset(cx, code)).await;
+                    let _ = std::future::poll_fn(|cx| guard.poll_stop_sending(cx, code)).await;
+                    drop(guard);
+                    let mut state = conn_state.lock();
+                    if let Some(code) = state.note_local_error_reset() {
+                        state.close_code = Some(code);
+                    }
+                    return;
+                }
+            }
+        } else {
+            poll_headers.await
+        }
     };
     let request = match request_headers {
         Ok(Some(request)) => request,
@@ -856,6 +881,7 @@ where
             let date_cache = date_header_value_cached;
             let send_continue_response = options.send_continue_response;
             let send_date_header = options.send_date_header;
+            let header_read_timeout = options.header_read_timeout;
 
             // The QUIC handshake may not be complete yet (0-RTT); wait for
             // it, bounded by the handshake timeout. Server-side QUIC
@@ -1151,6 +1177,7 @@ where
                                         send_date_header,
                                         conn_state_for_task,
                                         stream_error_callback,
+                                        header_read_timeout,
                                     )
                                     .await;
                                 });

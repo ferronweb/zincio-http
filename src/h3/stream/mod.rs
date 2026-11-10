@@ -336,7 +336,6 @@ impl RequestStream {
     }
 
     /// The QUIC stream ID of this request stream.
-    #[allow(dead_code)] // consumed by the connection driver (step 15)
     #[inline]
     pub(crate) fn id(&self) -> u64 {
         self.stream_id
@@ -998,8 +997,7 @@ fn build_uri(
 ) -> Result<Uri, StreamError> {
     if connect {
         // RFC 9220: the target is (scheme, authority). The request URI
-        // conventionally carries the authority; step 15 passes the tunnel
-        // target on.
+        // conventionally carries the authority
         let authority = authority.as_ref().expect("CONNECT authority validated");
         let scheme = scheme
             .as_ref()

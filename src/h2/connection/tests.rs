@@ -276,7 +276,8 @@ fn stream_window_update_overflow_is_stream_error() {
     // Open a stream so it has a flow-control window.
     let (reset_tx, _) = kanal::bounded_async::<u32>(1);
     let (_, msg_rx) = kanal::bounded_async::<StreamMsg>(1);
-    conn.streams.insert(1, StreamEntry::new(reset_tx, msg_rx));
+    conn.streams
+        .insert(1, StreamEntry::new(reset_tx, msg_rx, None));
     conn.handle_window_update(1, 0x7fff_ffff);
     let decoded = decode_frames(&conn.out);
     assert!(decoded.iter().any(|f| matches!(
@@ -395,7 +396,8 @@ fn local_reset_budget_can_be_disabled() {
 fn inject_pending_stream(conn: &mut Connection<tokio::io::DuplexStream>, id: u32) {
     let (reset_tx, _) = kanal::bounded_async::<u32>(1);
     let (_, msg_rx) = kanal::bounded_async::<StreamMsg>(1);
-    conn.streams.insert(id, StreamEntry::new(reset_tx, msg_rx));
+    conn.streams
+        .insert(id, StreamEntry::new(reset_tx, msg_rx, None));
 }
 
 #[test]

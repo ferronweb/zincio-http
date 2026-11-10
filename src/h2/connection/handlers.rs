@@ -59,6 +59,9 @@ where
         entry.extend_block(block);
         if end_headers {
             entry.continuation_frames = 0;
+            if let Some(cancel) = entry.header_timeout_cancel.take() {
+                cancel.cancel();
+            }
             self.complete_blocks.push_back(stream_id);
         } else {
             self.check_continuation_flood(stream_id);
@@ -128,7 +131,21 @@ where
         // showed ~76 MiB across 38k streams for 32/16).
         let (reset_tx, reset_rx) = kanal::bounded_async(1);
         let (msg_tx, msg_rx) = kanal::bounded_async(8);
-        let mut entry = StreamEntry::new(reset_tx, msg_rx);
+
+        let timeout_fut = if let Some(timeout) = self.header_read_timeout {
+            (!end_headers && !end_stream).then(|| HeaderTimeoutFut::new(stream_id, timeout))
+        } else {
+            None
+        };
+        let timeout_cancel = if let Some(timeout_fut) = timeout_fut {
+            let cancel = timeout_fut.get_cancel_token();
+            self.stream_header_timeouts.push(timeout_fut);
+            Some(cancel)
+        } else {
+            None
+        };
+
+        let mut entry = StreamEntry::new(reset_tx, msg_rx, timeout_cancel);
         entry.send_window = self.peer.initial_window_size as i64;
         entry.msg_tx = Some(msg_tx);
         entry.reset_rx = Some(reset_rx);
@@ -508,6 +525,17 @@ where
             entry.send_reset(error_code);
         }
     }
+
+    #[inline]
+    pub(crate) fn handle_header_timeout(&mut self, stream_id: u32) {
+        if let Some(entry) = self.streams.get_mut(&stream_id) {
+            if !entry.request_started {
+                self.report_stream_error(stream_id, "stream header read timeout");
+                self.stream_error(stream_id, Reason::Cancel);
+            }
+        }
+    }
+
     #[inline]
     pub(crate) fn apply_peer_settings(&mut self, settings: &[crate::h2::codec::Setting]) {
         for setting in settings {

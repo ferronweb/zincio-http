@@ -142,6 +142,7 @@ pub(crate) struct StreamEntry {
     /// END_HEADERS plus each CONTINUATION). Resets to 0 when the block
     /// completes; bounded by the connection's continuation-flood limit.
     pub(crate) continuation_frames: usize,
+    pub(crate) header_timeout_cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl StreamEntry {
@@ -149,6 +150,7 @@ impl StreamEntry {
     pub(crate) fn new(
         reset_tx: kanal::AsyncSender<u32>,
         msg_rx: kanal::AsyncReceiver<StreamMsg>,
+        header_timeout_cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Self {
         StreamEntry {
             body_tx: None,
@@ -173,6 +175,7 @@ impl StreamEntry {
             deficit: 0,
             header_list_size: 0,
             continuation_frames: 0,
+            header_timeout_cancel,
         }
     }
 

@@ -18,6 +18,7 @@ pub struct Http3Options {
     pub(super) local_settings: LocalSettings,
     pub(super) accept_timeout: Option<std::time::Duration>,
     pub(super) handshake_timeout: Option<std::time::Duration>,
+    pub(super) header_read_timeout: Option<std::time::Duration>,
     pub(super) send_continue_response: bool,
     pub(super) send_date_header: bool,
     pub(super) max_local_error_reset_streams: Option<usize>,
@@ -31,6 +32,7 @@ impl Http3Options {
     /// |---|---|
     /// | `accept_timeout` | 30 seconds |
     /// | `handshake_timeout` | 30 seconds |
+    /// | `header_read_timeout` | 30 seconds |
     /// | `send_continue_response` | `true` |
     /// | `send_date_header` | `true` |
     /// | `qpack_max_table_capacity` | `0` (RFC 9204 default) |
@@ -52,6 +54,7 @@ impl Http3Options {
             local_settings: LocalSettings::default(),
             accept_timeout: Some(std::time::Duration::from_secs(30)),
             handshake_timeout: Some(std::time::Duration::from_secs(30)),
+            header_read_timeout: Some(std::time::Duration::from_secs(30)),
             send_continue_response: true,
             send_date_header: true,
             max_local_error_reset_streams: Some(1024),
@@ -130,6 +133,17 @@ impl Http3Options {
     #[inline]
     pub fn handshake_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
         self.handshake_timeout = timeout;
+        self
+    }
+
+    /// Sets the timeout for reading the complete request head.
+    ///
+    /// If the client does not send a full set of request headers within this
+    /// duration the HTTP/2 stream is closed with `RST_STREAM`.
+    /// Pass `None` to disable the timeout entirely. Defaults to **30 seconds**.
+    #[inline]
+    pub fn header_read_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.header_read_timeout = timeout;
         self
     }
 

@@ -667,6 +667,14 @@ impl ControlStreams {
                         return Poll::Ready(Err(ControlError::StreamCreation));
                     }
                     if !leftover.is_empty() {
+                        {
+                            let mut encoder_guard = self.shared.encoder.lock();
+                            if let Some(encoder) = encoder_guard.as_mut() {
+                                if let Err(err) = encoder.feed_decoder_stream(&chunk) {
+                                    return Poll::Ready(Err(ControlError::Qpack(err)));
+                                }
+                            }
+                        }
                         let mut decoder = self.shared.decoder.lock();
                         if let Err(err) = decoder.feed_decoder_stream(&leftover) {
                             return Poll::Ready(Err(ControlError::Qpack(err)));
@@ -704,8 +712,11 @@ impl ControlStreams {
                 self.settings_received = true;
                 self.peer.apply(&settings);
                 {
-                    *self.shared.encoder.lock() =
-                        Some(Encoder::new(self.peer.qpack_max_table_capacity(), true));
+                    *self.shared.encoder.lock() = Some(Encoder::with_max_blocked(
+                        self.peer.qpack_max_table_capacity(),
+                        self.peer.qpack_blocked_streams(),
+                        true,
+                    ));
                     *self.shared.peer_max_field_section_size.lock() =
                         self.peer.max_field_section_size();
                 }

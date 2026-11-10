@@ -180,6 +180,8 @@ pub(crate) struct SharedCodecs {
     /// SETTINGS). `wait_for_encoder` awaits this; the control plane calls
     /// `notify_waiters` once.
     pub(crate) encoder_notify: Notify,
+    /// Waker for connection driver (used for encoder stream pushes)
+    pub(crate) driver_waiter: Mutex<Option<Waker>>,
 }
 
 impl SharedCodecs {
@@ -208,6 +210,7 @@ impl SharedCodecs {
             local_max_field_section_size: local.max_field_section_size,
             waiters: Mutex::new(FxHashMap::default()),
             encoder_notify: Notify::new(),
+            driver_waiter: Mutex::new(None),
         }
     }
 
@@ -690,6 +693,9 @@ impl RequestStream {
         let encoder_stream = section.encoder_stream;
         if !encoder_stream.is_empty() {
             self.shared.encoder_stream.lock().push_back(encoder_stream);
+            if let Some(waiter) = self.shared.driver_waiter.lock().take() {
+                waiter.wake();
+            }
         }
         let mut frame_header =
             BytesMut::with_capacity(1 + crate::h3::frame::varint_size(block.len() as u64));
@@ -927,13 +933,7 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
         return Err(StreamError::Message);
     }
     if connect {
-        if extended {
-            // RFC 9220 Section 3: an extended CONNECT carries `:scheme`,
-            // `:authority`, `:method` and `:protocol`, never `:path`.
-            if scheme.is_none() || authority.is_none() || path.is_some() {
-                return Err(StreamError::Message);
-            }
-        } else {
+        if !extended {
             // RFC 9114 Section 4.1: a plain CONNECT carries only `:method`
             // and `:authority`; `:scheme` and `:path` must be omitted.
             if authority.is_none() || scheme.is_some() || path.is_some() {
@@ -959,6 +959,12 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
         if request.headers_mut().try_append(name, value).is_err() {
             return Err(StreamError::Message);
         }
+    }
+    if let Some(proto) = protocol
+        .as_deref()
+        .and_then(|p| crate::ext::Protocol::from_bytes(p))
+    {
+        request.extensions_mut().insert(proto);
     }
     Ok(request)
 }

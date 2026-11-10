@@ -59,6 +59,9 @@ where
         entry.extend_block(block);
         if end_headers {
             entry.continuation_frames = 0;
+            if let Some(cancel) = entry.header_timeout_cancel.take() {
+                cancel.cancel();
+            }
             self.complete_blocks.push_back(stream_id);
         } else {
             self.check_continuation_flood(stream_id);
@@ -128,7 +131,21 @@ where
         // showed ~76 MiB across 38k streams for 32/16).
         let (reset_tx, reset_rx) = kanal::bounded_async(1);
         let (msg_tx, msg_rx) = kanal::bounded_async(8);
-        let mut entry = StreamEntry::new(reset_tx, msg_rx);
+
+        let timeout_fut = if let Some(timeout) = self.header_read_timeout {
+            (!end_headers && !end_stream).then(|| HeaderTimeoutFut::new(stream_id, timeout))
+        } else {
+            None
+        };
+        let timeout_cancel = if let Some(timeout_fut) = timeout_fut {
+            let cancel = timeout_fut.get_cancel_token();
+            self.stream_header_timeouts.push(timeout_fut);
+            Some(cancel)
+        } else {
+            None
+        };
+
+        let mut entry = StreamEntry::new(reset_tx, msg_rx, timeout_cancel);
         entry.send_window = self.peer.initial_window_size as i64;
         entry.msg_tx = Some(msg_tx);
         entry.reset_rx = Some(reset_rx);
@@ -233,13 +250,14 @@ where
             }
             return;
         }
-        let parsed = match crate::h2::stream::parse_request(&decoded) {
-            Ok(parsed) => parsed,
-            Err(MalformedRequest) => {
-                self.stream_error(stream_id, Reason::ProtocolError);
-                return;
-            }
-        };
+        let parsed =
+            match crate::h2::stream::parse_request(&decoded, self.opts.enable_connect_protocol) {
+                Ok(parsed) => parsed,
+                Err(MalformedRequest) => {
+                    self.stream_error(stream_id, Reason::ProtocolError);
+                    return;
+                }
+            };
         if end_stream {
             // No DATA frame will follow: close the request body now so the
             // handler's body reader sees end-of-stream (RFC 9113 Section
@@ -284,20 +302,42 @@ where
         let send_continue_body = send_continue.then(|| Arc::new(AtomicBool::new(false)));
         let (early_hints, early_hints_rx) = EarlyHints::new_lazy();
 
-        let mut request = Request::new(if parsed.is_connect {
-            Incoming::Empty
-        } else if let Some(body_rx) = body_rx {
-            Incoming::H2(H2Body::new(body_rx, send_continue_body.clone()))
+        let (mut request, upgrade) = if let Some(body_rx) = body_rx {
+            if parsed.is_connect {
+                (Request::new(Incoming::Empty), Some(body_rx))
+            } else {
+                (
+                    Request::new(Incoming::H2(H2Body::new(
+                        body_rx,
+                        send_continue_body.clone(),
+                    ))),
+                    None,
+                )
+            }
         } else {
             // The request ended with HEADERS, so no body frames can
             // arrive; expose an empty body without a channel for it.
-            Incoming::Empty
-        });
+            (Request::new(Incoming::Empty), None)
+        };
         *request.method_mut() = parsed.method;
         *request.uri_mut() = parsed.uri;
         *request.version_mut() = http::Version::HTTP_2;
         *request.headers_mut() = parsed.headers;
         request.extensions_mut().insert(early_hints);
+        if let Some(protocol) = parsed.protocol {
+            request.extensions_mut().insert(protocol);
+        }
+
+        let upgrade = if let Some(recv_stream) = upgrade {
+            let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
+            let upgrade = crate::Upgrade::new(upgrade_rx);
+            let upgraded = upgrade.upgraded.clone();
+            request.extensions_mut().insert(upgrade);
+            Some((upgrade_tx, upgraded, recv_stream))
+        } else {
+            None
+        };
+
         if end_stream && parsed.content_length.is_some_and(|cl| cl != 0) {
             // A request that ended without delivering its declared
             // body: stream error (RFC 9113 Section 8.1.2.6).
@@ -339,6 +379,7 @@ where
             send_continue_body,
             parsed.is_connect,
             is_head,
+            upgrade,
         ));
     }
 
@@ -393,7 +434,11 @@ where
                     StreamDataState::Bad
                 } else {
                     entry.data_sum += data.len() as u64;
-                    if !entry.send_body(BodyMsg::Data(data)).await {
+                    if entry.content_length.is_some_and(|cl| entry.data_sum > cl) {
+                        // Malformed at once (RFC 9113 Section 8.1.1), before the
+                        // handler, which may stop reading at the declared length.
+                        StreamDataState::TooLong
+                    } else if !entry.send_body(BodyMsg::Data(data)).await {
                         StreamDataState::Gone
                     } else {
                         StreamDataState::Ok
@@ -421,6 +466,7 @@ where
                     .write_reset(&mut self.out, stream_id, Reason::StreamClosed.code());
             }
             StreamDataState::Bad => self.stream_error(stream_id, Reason::StreamClosed),
+            StreamDataState::TooLong => self.stream_error(stream_id, Reason::ProtocolError),
             StreamDataState::Gone => {
                 self.mark_closed(stream_id);
                 self.streams.remove(&stream_id);
@@ -508,6 +554,17 @@ where
             entry.send_reset(error_code);
         }
     }
+
+    #[inline]
+    pub(crate) fn handle_header_timeout(&mut self, stream_id: u32) {
+        if let Some(entry) = self.streams.get_mut(&stream_id) {
+            if !entry.request_started {
+                self.report_stream_error(stream_id, "stream header read timeout");
+                self.stream_error(stream_id, Reason::Cancel);
+            }
+        }
+    }
+
     #[inline]
     pub(crate) fn apply_peer_settings(&mut self, settings: &[crate::h2::codec::Setting]) {
         for setting in settings {

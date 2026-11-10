@@ -99,6 +99,11 @@ pub struct Encoder {
     /// Upper bound on the dynamic table capacity allowed by the decoder's
     /// SETTINGS_QPACK_MAX_TABLE_CAPACITY (RFC 9204 Section 5).
     max_capacity: u64,
+    /// Maximum number of streams an encoder is permitted to block while
+    /// decompressing QPACK headers, determined by SETTINGS_QPACK_BLOCKED_STREAMS
+    max_blocked: u64,
+    /// Number of blocked sections per stream.
+    blocked_by_stream: rustc_hash::FxHashMap<u64, usize>,
     /// Whether string literals are Huffman encoded when that is shorter.
     huffman: bool,
     /// Number of dynamic table insertions and duplications acknowledged by
@@ -129,6 +134,26 @@ impl Encoder {
         Self {
             dynamic: DynamicTable::new(0),
             max_capacity,
+            max_blocked: u64::MAX,
+            blocked_by_stream: rustc_hash::FxHashMap::default(),
+            huffman,
+            known_received: 0,
+            pending_refs: VecDeque::new(),
+            cached_min_pending: u64::MAX,
+            decoder_stream_pending: Vec::new(),
+        }
+    }
+
+    /// Creates an encoder bound to a decoder that advertised the given
+    /// `max_capacity` in SETTINGS_QPACK_MAX_TABLE_CAPACITY and `max_blocked`
+    /// in SETTINGS_QPACK_BLOCKED_STREAMS.
+    #[inline]
+    pub fn with_max_blocked(max_capacity: u64, max_blocked: u64, huffman: bool) -> Self {
+        Self {
+            dynamic: DynamicTable::new(0),
+            max_capacity,
+            max_blocked,
+            blocked_by_stream: rustc_hash::FxHashMap::default(),
             huffman,
             known_received: 0,
             pending_refs: VecDeque::new(),
@@ -299,7 +324,9 @@ impl Encoder {
             let safe = self.dynamic.inserted() - self.dynamic.len() as u64
                 + self.dynamic.would_evict(size)
                 <= boundary;
-            if usable && size <= self.max_capacity && safe {
+            // Respect SETTINGS_QPACK_BLOCKED_STREAMS setting and limit possibly blocked streams...
+            let can_block = (self.blocked_by_stream.len() as u64) < self.max_blocked;
+            if usable && size <= self.max_capacity && safe && can_block {
                 // Set Dynamic Table Capacity (4.3.1), emitted lazily right
                 // before the first insert of this section.
                 if self.dynamic.capacity() != self.max_capacity {
@@ -325,6 +352,7 @@ impl Encoder {
         if ric > 0 {
             let min_ref = min_rel_ref.unwrap_or(0);
             self.pending_refs.push_back((stream_id, min_ref));
+            *self.blocked_by_stream.entry(stream_id).or_insert(0) += 1;
             if min_ref < self.cached_min_pending {
                 self.cached_min_pending = min_ref;
             }
@@ -646,6 +674,13 @@ impl Encoder {
                 {
                     let removed_min = self.pending_refs[pos].1;
                     self.pending_refs.remove(pos);
+                    self.blocked_by_stream
+                        .entry(stream_id)
+                        .and_modify(|count| *count = count.saturating_sub(1));
+                    if self.blocked_by_stream.get(&stream_id).copied() == Some(0) {
+                        // See check code with "self.blocked_by_stream.len()"
+                        self.blocked_by_stream.remove(&stream_id);
+                    }
                     if removed_min == self.cached_min_pending {
                         self.cached_min_pending = self
                             .pending_refs
@@ -663,6 +698,7 @@ impl Encoder {
                     .map_err(|_| QpackError::DecoderStream)?;
                 let prev_len = self.pending_refs.len();
                 self.pending_refs.retain(|(id, _)| *id != stream_id);
+                self.blocked_by_stream.remove(&stream_id);
                 if self.pending_refs.len() != prev_len {
                     self.cached_min_pending = self
                         .pending_refs

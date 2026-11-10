@@ -1,5 +1,10 @@
 use super::*;
 
+/// A server that has not allowed extended CONNECT (RFC 8441), as by default.
+fn parse_request(headers: &[Header]) -> Result<ParsedRequest, MalformedRequest> {
+    super::parse_request(headers, false)
+}
+
 fn parse_ok(pairs: &[(&str, &str)]) -> ParsedRequest {
     let headers = pairs
         .iter()
@@ -213,4 +218,60 @@ fn content_length_parser() {
 fn parse_function_overflow() -> bool {
     // 2^64 overflows u64: rejected.
     parse_content_length(b"18446744073709551616").is_err()
+}
+
+fn extended(
+    pairs: &[(&str, &str)],
+    connect_protocol: bool,
+) -> Result<ParsedRequest, MalformedRequest> {
+    super::parse_request(
+        &pairs.iter().map(pair_header).collect::<Vec<_>>(),
+        connect_protocol,
+    )
+}
+
+#[test]
+fn extended_connect_carries_its_target_and_protocol() {
+    let websocket = [
+        (":method", "CONNECT"),
+        (":protocol", "websocket"),
+        (":scheme", "https"),
+        (":authority", "example.com"),
+        (":path", "/chat?room=1"),
+    ];
+    let parsed = extended(&websocket, true).expect("RFC 8441 request");
+    assert_eq!(parsed.method, Method::CONNECT);
+    assert_eq!(parsed.uri, "https://example.com/chat?room=1");
+    assert_eq!(parsed.protocol, Some(Protocol::from_static("websocket")));
+    assert!(parsed.is_connect, "the stream is a tunnel");
+    // Not before the server allowed it (RFC 8441 Section 3).
+    assert!(extended(&websocket, false).is_err());
+}
+
+#[test]
+fn extended_connect_needs_every_pseudo_header_and_a_token() {
+    let full = [
+        (":method", "CONNECT"),
+        (":protocol", "websocket"),
+        (":scheme", "https"),
+        (":authority", "example.com"),
+        (":path", "/"),
+    ];
+    for missing in [":scheme", ":authority", ":path"] {
+        let pairs: Vec<_> = full
+            .iter()
+            .copied()
+            .filter(|(n, _)| *n != missing)
+            .collect();
+        assert!(extended(&pairs, true).is_err(), "without {missing}");
+    }
+    let mut not_connect = full;
+    not_connect[0] = (":method", "GET");
+    assert!(extended(&not_connect, true).is_err(), ":protocol on GET");
+    let mut not_token = full;
+    not_token[1] = (":protocol", "web socket");
+    assert!(
+        extended(&not_token, true).is_err(),
+        "a protocol that is not a token"
+    );
 }

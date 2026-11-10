@@ -18,6 +18,7 @@ use crate::h2::codec::{
 pub struct Http2Options {
     /// Max time to wait for the client's preface before giving up.
     pub(crate) handshake_timeout: Option<Duration>,
+    pub(crate) header_read_timeout: Option<std::time::Duration>,
     /// Send a `100 Continue` response as soon as a request's headers arrive,
     /// before its body has been fully read.
     pub(crate) send_continue_response: bool,
@@ -63,6 +64,7 @@ impl Default for Http2Options {
     fn default() -> Self {
         Http2Options {
             handshake_timeout: Some(Duration::from_secs(10)),
+            header_read_timeout: Some(Duration::from_secs(30)),
             send_continue_response: true,
             send_date_header: true,
             max_concurrent_streams: 200,
@@ -90,6 +92,17 @@ impl Http2Options {
     #[inline]
     pub fn handshake_timeout(mut self, handshake_timeout: Option<Duration>) -> Self {
         self.handshake_timeout = handshake_timeout;
+        self
+    }
+
+    /// Sets the timeout for reading the complete request head.
+    ///
+    /// If the client does not send a full set of request headers within this
+    /// duration the HTTP/2 stream is closed with `RST_STREAM`.
+    /// Pass `None` to disable the timeout entirely. Defaults to **30 seconds**.
+    #[inline]
+    pub fn header_read_timeout(mut self, header_read_timeout: Option<Duration>) -> Self {
+        self.header_read_timeout = header_read_timeout;
         self
     }
 

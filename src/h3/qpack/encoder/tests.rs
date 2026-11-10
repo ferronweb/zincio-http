@@ -522,3 +522,32 @@ fn decoder_stream_integers_past_the_prefix_are_read_whole() {
         );
     }
 }
+
+#[test]
+fn encoder_should_not_block_too_much() {
+    // The encoder must not block a section that could be encoded with
+    // the current dynamic table state. A blocked section is a bug in
+    // the encoder's logic, not a network condition.
+    let mut enc = Encoder::with_max_blocked(2048, 8, false);
+    enc.set_capacity(2048);
+
+    for i in 0..8 {
+        let fields: Vec<_> = vec![hdr(&format!("x-field-{i}"), "v")];
+        let out = enc.encode_section(i, &fields);
+        assert!(
+            !out.encoder_stream.is_empty(),
+            "nothing in the encoder stream, but there should be insert instructions \
+             (dynamic table)"
+        );
+    }
+
+    // These would overflow the stream block limit, so it should be literals
+    for i in 8..16 {
+        let fields: Vec<_> = vec![hdr(&format!("x-field-{i}"), "v")];
+        let out = enc.encode_section(i, &fields);
+        assert!(
+            out.encoder_stream.is_empty(),
+            "unexpected insert instructions for dynamic table in the encoder stream"
+        );
+    }
+}

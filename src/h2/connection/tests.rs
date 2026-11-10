@@ -276,7 +276,8 @@ fn stream_window_update_overflow_is_stream_error() {
     // Open a stream so it has a flow-control window.
     let (reset_tx, _) = kanal::bounded_async::<u32>(1);
     let (_, msg_rx) = kanal::bounded_async::<StreamMsg>(1);
-    conn.streams.insert(1, StreamEntry::new(reset_tx, msg_rx));
+    conn.streams
+        .insert(1, StreamEntry::new(reset_tx, msg_rx, None));
     conn.handle_window_update(1, 0x7fff_ffff);
     let decoded = decode_frames(&conn.out);
     assert!(decoded.iter().any(|f| matches!(
@@ -395,7 +396,8 @@ fn local_reset_budget_can_be_disabled() {
 fn inject_pending_stream(conn: &mut Connection<tokio::io::DuplexStream>, id: u32) {
     let (reset_tx, _) = kanal::bounded_async::<u32>(1);
     let (_, msg_rx) = kanal::bounded_async::<StreamMsg>(1);
-    conn.streams.insert(id, StreamEntry::new(reset_tx, msg_rx));
+    conn.streams
+        .insert(id, StreamEntry::new(reset_tx, msg_rx, None));
 }
 
 #[test]
@@ -826,6 +828,39 @@ fn frames_after_a_peer_goaway_are_answered_before_closing() {
         decoded.iter().any(|f| matches!(
             f,
             Frame::Ping { ack: true, payload } if payload == b"h2spec  "
+        )),
+        "{decoded:?}"
+    );
+}
+
+#[test]
+fn data_past_the_content_length_is_a_stream_error_at_once() {
+    // RFC 9113 Section 8.1.1: the DATA frames must add up to `content-length`.
+    // Excess is malformed as soon as it arrives, whether or not the handler
+    // still reads the body (it may stop at the declared length).
+    let mut encoder = Encoder::new(4096);
+    let mut block = Vec::new();
+    encoder.encode(
+        &[
+            HpackHeader::new(":method", "POST"),
+            HpackHeader::new(":scheme", "http"),
+            HpackHeader::new(":path", "/"),
+            HpackHeader::new(":authority", "x"),
+            HpackHeader::new("content-length", "4"),
+        ],
+        &mut block,
+    );
+    let script = client_script(|writer, out| {
+        writer.write_headers(out, 1, false, true, None, &block);
+        writer.write_data(out, 1, false, b"test");
+        writer.write_data(out, 1, false, b"test");
+    });
+    let reply = run_connection(CLIENT_PREFACE, &script, Some(Duration::from_secs(5)), None);
+    let decoded = decode_frames(&reply);
+    assert!(
+        decoded.iter().any(|f| matches!(
+            f,
+            Frame::Reset { stream_id: 1, error_code } if *error_code == Reason::ProtocolError.code()
         )),
         "{decoded:?}"
     );

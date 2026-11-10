@@ -23,10 +23,28 @@ use tokio::io::{AsyncRead, AsyncWrite};
 /// but not yet consumed are prepended to the read stream via the `leftover`
 /// buffer, ensuring no data is lost during the transition.
 pub struct Upgraded {
-    reader: SendWrapper<Pin<Box<dyn AsyncRead + Unpin>>>,
-    writer: SendWrapper<Pin<Box<dyn AsyncWrite + Unpin>>>,
+    io: SendWrapper<Box<dyn UpgradedIo>>,
     leftover: Option<bytes::Bytes>,
     has_ended: bool,
+}
+
+/// The connection's own I/O, kept as its type so [`Upgraded::downcast`] can
+/// hand it back.
+trait UpgradedIo: AsyncRead + AsyncWrite + Unpin {
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
+    fn is_a(&self, type_id: std::any::TypeId) -> bool;
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + 'static> UpgradedIo for T {
+    #[inline]
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+
+    #[inline]
+    fn is_a(&self, type_id: std::any::TypeId) -> bool {
+        std::any::TypeId::of::<T>() == type_id
+    }
 }
 
 impl Upgraded {
@@ -35,13 +53,38 @@ impl Upgraded {
         io: impl AsyncRead + AsyncWrite + Unpin + 'static,
         leftover: Option<bytes::Bytes>,
     ) -> Self {
-        let (reader, writer) = tokio::io::split(io);
         Self {
-            reader: SendWrapper::new(Box::pin(reader)),
-            writer: SendWrapper::new(Box::pin(writer)),
+            io: SendWrapper::new(Box::new(io)),
             leftover,
             has_ended: false,
         }
+    }
+
+    /// The I/O the connection was served on, when it is a `T`, with the bytes
+    /// read from it past the request and not yet read from this `Upgraded`;
+    /// otherwise the `Upgraded` unchanged. For a protocol that needs the
+    /// connection itself, such as one handing a kernel TLS socket to
+    /// `splice`.
+    ///
+    /// # Panics
+    ///
+    /// On a thread other than the one the connection was served on, as any
+    /// other use of an `Upgraded`.
+    #[inline]
+    pub fn downcast<T: AsyncRead + AsyncWrite + Unpin + 'static>(
+        self,
+    ) -> Result<(T, Option<bytes::Bytes>), Self> {
+        // The boxed value's type, not the box's (which is I/O too).
+        if !(**self.io).is_a(std::any::TypeId::of::<T>()) {
+            return Err(self);
+        }
+        let io = self
+            .io
+            .take()
+            .into_any()
+            .downcast::<T>()
+            .expect("the type was checked above");
+        Ok((*io, self.leftover))
     }
 }
 
@@ -62,7 +105,7 @@ impl AsyncRead for Upgraded {
             }
             return std::task::Poll::Ready(Ok(()));
         }
-        match (*self.reader).as_mut().poll_read(cx, buf) {
+        match Pin::new(&mut **self.io).poll_read(cx, buf) {
             std::task::Poll::Ready(Err(e))
                 if matches!(e.kind(), std::io::ErrorKind::UnexpectedEof) =>
             {
@@ -90,7 +133,7 @@ impl AsyncWrite for Upgraded {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        match (*self.writer).as_mut().poll_write(cx, buf) {
+        match Pin::new(&mut **self.io).poll_write(cx, buf) {
             std::task::Poll::Ready(Err(e))
                 if self.has_ended && matches!(e.kind(), std::io::ErrorKind::BrokenPipe) =>
             {
@@ -105,7 +148,7 @@ impl AsyncWrite for Upgraded {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        match (*self.writer).as_mut().poll_flush(cx) {
+        match Pin::new(&mut **self.io).poll_flush(cx) {
             std::task::Poll::Ready(Err(e))
                 if self.has_ended && matches!(e.kind(), std::io::ErrorKind::BrokenPipe) =>
             {
@@ -120,7 +163,7 @@ impl AsyncWrite for Upgraded {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        match (*self.writer).as_mut().poll_shutdown(cx) {
+        match Pin::new(&mut **self.io).poll_shutdown(cx) {
             std::task::Poll::Ready(Err(e))
                 if self.has_ended && matches!(e.kind(), std::io::ErrorKind::BrokenPipe) =>
             {
@@ -132,7 +175,7 @@ impl AsyncWrite for Upgraded {
 
     #[inline]
     fn is_write_vectored(&self) -> bool {
-        self.writer.is_write_vectored()
+        self.io.is_write_vectored()
     }
 
     #[inline]
@@ -141,7 +184,7 @@ impl AsyncWrite for Upgraded {
         cx: &mut std::task::Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        (*self.writer).as_mut().poll_write_vectored(cx, bufs)
+        Pin::new(&mut **self.io).poll_write_vectored(cx, bufs)
     }
 }
 

@@ -25,7 +25,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_util::{pin_mut, FutureExt};
+use futures_util::{pin_mut, FutureExt, StreamExt};
 use http::{Request, Response, StatusCode};
 use http_body::Body;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -141,6 +141,65 @@ impl Default for PeerSettings {
     }
 }
 
+struct HeaderTimeoutFut {
+    stream_id: u32,
+    timed_out: bool,
+    fut: zincio::time::Sleep,
+    cancel_token: CancellationToken,
+}
+
+impl HeaderTimeoutFut {
+    fn new(stream_id: u32, timeout: Duration) -> Self {
+        let mut fut = zincio::time::sleep(timeout);
+        // `zincio`'s `Sleep` seems to register a waker on poll...
+        let timed_out = Pin::new(&mut fut)
+            .poll(&mut Context::from_waker(std::task::Waker::noop()))
+            .is_ready();
+        HeaderTimeoutFut {
+            stream_id,
+            timed_out,
+            fut,
+            cancel_token: CancellationToken::new(),
+        }
+    }
+
+    fn get_cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+}
+
+impl Future for HeaderTimeoutFut {
+    type Output = Option<u32>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.timed_out {
+            return Poll::Ready(Some(this.stream_id));
+        }
+        match std::pin::pin!(this.cancel_token.cancelled()).poll(cx) {
+            Poll::Ready(_) => {
+                this.timed_out = true;
+                return Poll::Ready(None);
+            }
+            Poll::Pending => {}
+        }
+        match Pin::new(&mut this.fut).poll(cx) {
+            Poll::Ready(_) => {
+                this.timed_out = true;
+                Poll::Ready(Some(this.stream_id))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl futures_util::future::FusedFuture for HeaderTimeoutFut {
+    fn is_terminated(&self) -> bool {
+        self.timed_out
+    }
+}
+
 /// An HTTP/2 server connection.
 ///
 /// `Io` must be a raw transport: the preface is read byte-exact, so
@@ -179,6 +238,10 @@ pub struct Connection<Io> {
     closed_order: VecDeque<u32>,
     /// Behavior options for this connection (used by [`Connection::handle`]).
     opts: ConnectionOptions,
+    /// Maximum time to wait for a stream's header block to complete
+    /// (END_HEADERS seen) before resetting it with `RequestTimeout`.
+    /// `None` disables the timeout.
+    header_read_timeout: Option<std::time::Duration>,
     /// RST_STREAM frames this endpoint has sent in response to the
     /// peer's protocol errors (bounded by `opts.max_local_error_reset_streams`).
     local_error_resets: usize,
@@ -231,6 +294,8 @@ pub struct Connection<Io> {
     stream_error_callback: Option<crate::StreamErrorCallback>,
     /// First connection-level protocol error seen (set by [`Connection::goaway`]).
     connection_error: Option<std::io::Error>,
+    stream_header_timeouts: futures_util::stream::FuturesUnordered<HeaderTimeoutFut>,
+    stream_header_timeouts_cancel: FxHashMap<u32, CancellationToken>,
 }
 
 impl<Io> Connection<Io>
@@ -240,6 +305,16 @@ where
     /// Creates a connection over `io`.
     #[inline]
     pub fn new(io: Io, preface_timeout: Option<Duration>) -> Connection<Io> {
+        Self::with_header_timeout(io, preface_timeout, None)
+    }
+
+    /// Creates a connection osver `io`, with header read timeout.
+    #[inline]
+    pub fn with_header_timeout(
+        io: Io,
+        preface_timeout: Option<Duration>,
+        header_read_timeout: Option<Duration>,
+    ) -> Connection<Io> {
         Connection {
             io,
             decoder: FrameDecoder::new(DEFAULT_MAX_FRAME_SIZE),
@@ -250,6 +325,7 @@ where
             peer: PeerSettings::default(),
             local: PeerSettings::default(),
             preface_timeout,
+            header_read_timeout,
             streams: FxHashMap::default(),
             // RFC 9113 Section 6.9.1: connection send window starts at
             // 65535; the peer's WINDOW_UPDATEs raise it.
@@ -278,6 +354,8 @@ where
             frame_buffer: Vec::new(),
             stream_error_callback: None,
             connection_error: None,
+            stream_header_timeouts: futures_util::stream::FuturesUnordered::new(),
+            stream_header_timeouts_cancel: FxHashMap::default(),
         }
     }
 
@@ -445,7 +523,28 @@ where
                 }
             });
             let mut idle = idle_unfuse.fuse();
+
+            let stream_unfuse = std::pin::pin!(async {
+                loop {
+                    if self.stream_header_timeouts.is_empty() {
+                        futures_util::future::pending::<()>().await;
+                    } else {
+                        let stream_id = self.stream_header_timeouts.next().await;
+                        if let Some(Some(stream_id)) = stream_id {
+                            self.stream_header_timeouts_cancel.remove(&stream_id);
+                            return stream_id;
+                        }
+                    }
+                }
+            });
+            let mut stream = stream_unfuse.fuse();
+
             futures_util::select! {
+                stream_id = stream => {
+                    self.handle_header_timeout(stream_id);
+                    self.drain_outbound();
+                    self.flush().await?;
+                }
                 n = read => {
                     let n = match n {
                         Ok(n) => n,
@@ -749,6 +848,8 @@ enum StreamDataState {
     Idle,
     Closed,
     Bad,
+    /// More data than the request's `content-length`.
+    TooLong,
     Gone,
     Ok,
 }

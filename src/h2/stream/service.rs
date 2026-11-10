@@ -55,7 +55,6 @@ pin_project! {
             send_continue_body: Option<Arc<AtomicBool>>,
             continue_sent: bool,
             early_hints_open: bool,
-            extended_connect: bool,
             is_head: bool,
             upgrade: Option<(
                 oneshot::Sender<crate::Upgraded>,
@@ -88,7 +87,6 @@ impl<Fut, ResB> StreamDriver<Fut, ResB> {
         early_hints_rx: EarlyHintsReceiver,
         send_continue: bool,
         send_continue_body: Option<Arc<AtomicBool>>,
-        extended_connect: bool,
         is_head: bool,
         upgrade: Option<(
             oneshot::Sender<crate::Upgraded>,
@@ -114,7 +112,6 @@ impl<Fut, ResB> StreamDriver<Fut, ResB> {
                 send_continue_body,
                 continue_sent: false,
                 early_hints_open: true,
-                extended_connect,
                 is_head,
                 upgrade,
             },
@@ -183,7 +180,6 @@ where
                     send_continue_body,
                     continue_sent,
                     early_hints_open,
-                    extended_connect,
                     is_head,
                     upgrade,
                 } => {
@@ -201,7 +197,6 @@ where
                         send_continue_body,
                         continue_sent,
                         early_hints_open,
-                        *extended_connect,
                         *is_head,
                         upgrade,
                         cx,
@@ -290,7 +285,6 @@ where
         send_continue_body: &Option<Arc<AtomicBool>>,
         continue_sent: &mut bool,
         early_hints_open: &mut bool,
-        extended_connect: bool,
         is_head: bool,
         upgrade: &mut Option<(
             oneshot::Sender<crate::Upgraded>,
@@ -347,9 +341,9 @@ where
                     }
                     *continue_sent = true;
                 }
+                let connect = upgrade.is_some();
                 let (response_is_end_stream, mut parts, response_body) = if !is_head {
-                    let response_is_end_stream =
-                        response.body().is_end_stream() && !extended_connect;
+                    let response_is_end_stream = response.body().is_end_stream();
                     let (parts, response_body) = response.into_parts();
                     (response_is_end_stream, parts, Some(response_body))
                 } else {
@@ -357,11 +351,11 @@ where
                     (true, parts, None)
                 };
 
-                if extended_connect && parts.status == StatusCode::SWITCHING_PROTOCOLS {
+                if connect && parts.status == StatusCode::SWITCHING_PROTOCOLS {
                     // HTTP/2 upgrades use 200 OK, not 101 Switching Protocols
                     parts.status = StatusCode::OK;
                 }
-                if response_is_end_stream || extended_connect {
+                if response_is_end_stream || connect {
                     match Self::send(
                         msg_tx,
                         msg_tx_fut.as_mut(),

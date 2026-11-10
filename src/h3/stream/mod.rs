@@ -933,13 +933,7 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
         return Err(StreamError::Message);
     }
     if connect {
-        if extended {
-            // RFC 9220 Section 3: an extended CONNECT carries `:scheme`,
-            // `:authority`, `:method` and `:protocol`, never `:path`.
-            if scheme.is_none() || authority.is_none() || path.is_some() {
-                return Err(StreamError::Message);
-            }
-        } else {
+        if !extended {
             // RFC 9114 Section 4.1: a plain CONNECT carries only `:method`
             // and `:authority`; `:scheme` and `:path` must be omitted.
             if authority.is_none() || scheme.is_some() || path.is_some() {
@@ -965,6 +959,12 @@ fn build_request(headers: Vec<(Bytes, Bytes)>) -> Result<Request<()>, StreamErro
         if request.headers_mut().try_append(name, value).is_err() {
             return Err(StreamError::Message);
         }
+    }
+    if let Some(proto) = protocol
+        .as_deref()
+        .and_then(|p| crate::ext::Protocol::from_bytes(p))
+    {
+        request.extensions_mut().insert(proto);
     }
     Ok(request)
 }

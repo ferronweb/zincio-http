@@ -677,7 +677,12 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
         &stream,
         &shared,
         stream_id,
-        response_parts.status,
+        if upgrade.is_some() && response_parts.status == StatusCode::SWITCHING_PROTOCOLS {
+            // HTTP/3 upgrades use 200 OK, not 101 Switching Protocols
+            StatusCode::OK
+        } else {
+            response_parts.status
+        },
         &response_parts.headers,
     )
     .await

@@ -47,6 +47,7 @@ pub(super) fn pair(inner: Arc<Mutex<RequestStream>>) -> (H3Upgraded, UpgradedSen
         UpgradedSendStreamTask {
             inner,
             send_fut: None,
+            rx_fut: None,
             rx,
             error_tx: Some(error_tx),
         },
@@ -155,6 +156,7 @@ pub(super) struct UpgradedSendStreamTask {
     inner: Arc<Mutex<RequestStream>>,
     #[allow(clippy::type_complexity)]
     send_fut: Option<Pin<Box<dyn Future<Output = Result<(), StreamError>>>>>,
+    rx_fut: Option<Pin<Box<kanal::ReceiveFuture<'static, Box<[u8]>>>>>,
     rx: kanal::AsyncReceiver<Box<[u8]>>,
     error_tx: Option<oneshot::Sender<std::io::Error>>,
 }
@@ -196,14 +198,33 @@ impl UpgradedSendStreamTask {
                 }
             }
 
-            match std::pin::pin!(this.rx.recv()).poll(cx) {
+            let rx_fut = if let Some(fut) = &mut this.rx_fut {
+                fut
+            } else {
+                let fut = this.rx.recv();
+                // SAFETY: rx_fut lives as long as rx, which is owned by self.
+                // The stream is not moved out of rx, so it is safe to extend its
+                // lifetime to 'static.
+                let fut = unsafe {
+                    std::mem::transmute::<
+                        kanal::ReceiveFuture<'_, Box<[u8]>>,
+                        kanal::ReceiveFuture<'static, Box<[u8]>>,
+                    >(fut)
+                };
+                this.rx_fut = Some(Box::pin(fut));
+                this.rx_fut.as_mut().expect("rx_fut is Some")
+            };
+
+            match std::pin::pin!(rx_fut).poll(cx) {
                 Poll::Ready(Ok(cursor)) => {
+                    this.rx_fut = None;
                     this.send_fut = Some(Box::pin(Self::send_data(
                         this.inner.clone(),
                         Bytes::from_owner(cursor),
                     )));
                 }
                 Poll::Ready(Err(_)) => {
+                    this.rx_fut = None;
                     this.send_fut = Some(Box::pin(Self::finish(this.inner.clone())));
                 }
                 Poll::Pending => {

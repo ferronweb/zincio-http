@@ -670,7 +670,7 @@ impl ControlStreams {
                         {
                             let mut encoder_guard = self.shared.encoder.lock();
                             if let Some(encoder) = encoder_guard.as_mut() {
-                                if let Err(err) = encoder.feed_decoder_stream(&chunk) {
+                                if let Err(err) = encoder.feed_decoder_stream(&leftover) {
                                     return Poll::Ready(Err(ControlError::Qpack(err)));
                                 }
                             }

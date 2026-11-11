@@ -1,5 +1,11 @@
 # `zincio-http` change log
 
+## `zincio-http` 0.4.17
+
+**Released in November 11, 2026**
+
+- Fixed QPACK decoder errors caused by wrong interpretation of QPACK decoder instructions.
+
 ## `zincio-http` 0.4.16
 
 **Released in November 11, 2026**

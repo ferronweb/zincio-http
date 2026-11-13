@@ -14,14 +14,7 @@
 // HTTP/3 behaviour. It speaks only HTTP/3.
 //
 // The harness (interop/src/client.rs) decides whether an observation is
-// acceptable; this driver only reports what it saw. Scenario *inputs* -- which
-// headers to send, how many concurrent streams -- are constructed here, because
-// only the driver knows its own API. The *thresholds* those inputs are judged
-// against live in Rust.
-//
-// neqo drives no socket of its own: the application pumps UDP datagrams
-// through `process_output` / `process_input` and handles `Http3ClientEvent`s.
-// That loop lives in `pump` below; everything else is scenario plumbing.
+// acceptable; this driver only reports what it saw.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -518,9 +511,7 @@ fn run_generic(
 ) -> Result<(), String> {
     if scenario == "trailers" {
         // neqo's client API can observe response trailers but cannot send
-        // request trailers, and the scenario requires both directions. The
-        // capability table reflects this, so the matrix never asks; failing
-        // loudly here keeps a silent pass impossible.
+        // request trailers, and the scenario requires both directions.
         return Err("request_trailers_unsupported".to_owned());
     }
     let deadline = Instant::now() + SCENARIO_DEADLINE;

@@ -15,10 +15,7 @@
 // only HTTP/3.
 //
 // The harness (interop/src/client.rs) decides whether an observation is
-// acceptable; this driver only reports what it saw. Scenario *inputs* -- which
-// headers to send, how many concurrent streams -- are constructed here, because
-// only the driver knows its own API. The *thresholds* those inputs are judged
-// against live in Rust.
+// acceptable; this driver only reports what it saw.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -193,9 +190,7 @@ impl Endpoint {
         // Cap the wait well below any QUIC timer: `send` may report `Done`
         // while packets are pacing-gated rather than absent, and parking in
         // `recv` until the next QUIC timeout (up to the 30 s idle timeout)
-        // would stall an exchange that only needs another `flush`. Polling at
-        // this granularity costs a few wakeups per scenario and keeps every
-        // exchange moving even when no packet arrives to wake it.
+        // would stall an exchange that only needs another `flush`.
         let wait = self
             .conn
             .timeout()
@@ -587,11 +582,7 @@ fn run_generic(
         // quiche sends HEADERS atomically, and a fresh connection's
         // congestion window (~13 KiB) cannot fit a 32 KiB header block while
         // nothing is in flight to grow it: `send_request` reports
-        // StreamBlocked forever. That is a client-side transport constraint,
-        // not the refusal the scenario asserts, so prime the window with a
-        // sacrificial upload on the same connection first. The scenario still
-        // asserts exactly what it should (refusal of the big block); the
-        // extra exchange is invisible to the observation.
+        // StreamBlocked forever.
         let prime = pattern(PRIME_UPLOAD_LEN);
         let mut prime_resps = HashMap::new();
         let prime_id = send_request(
@@ -756,10 +747,7 @@ fn run_abort(base_url: &str, path: &str) -> Result<(), String> {
 }
 
 fn run_idle(base_url: &str, method: &str, path: &str, idle_ms: u64) -> Result<(), String> {
-    // quiche manages connection reuse internally; holding one connection idle
-    // past the server timeout and then requesting exercises the reaped path,
-    // and a transparent reconnect covers the case where the idle connection
-    // is already gone -- which is what the scenario asserts.
+    // quiche manages connection reuse internally...
     let deadline = Instant::now() + SCENARIO_DEADLINE;
     let authority = authority_of(base_url);
     let full_path = build_path("idle_reuse", path);

@@ -11,12 +11,7 @@ Prints one observation line per request on stdout:
 
 hyper-h2 gives raw frame-level control over a single h2c connection, so this
 is the only containerised client that can observe 103 Early Hints and
-trailers over HTTP/2 -- closing the container-coverage gap curl leaves there.
-
-Flow control is manual, as the library requires: received data must be
-acknowledged via acknowledge_received_data, or the transfer stalls at exactly
-the advertised window. Uploads are chunked against the local window the same
-way.
+trailers over HTTP/2 (closing the container-coverage gap curl leaves there).
 """
 
 import hashlib

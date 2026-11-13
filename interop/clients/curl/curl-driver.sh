@@ -30,10 +30,11 @@ if [ "${1:-}" = "--selftest" ]; then
 	exit 0
 fi
 
-# With no arguments this script is the container's main process. It announces
-# readiness and then idles, because the harness reuses one container for every
-# scenario and execs into it. Keeping the idle mode here rather than overriding
-# the command from outside means the image entrypoint can stay the driver.
+# With no arguments this script is the container's main process.
+#
+# It announces readiness and then idles, because the harness reuses one container
+# for every scenario and execs into it. Also, this way the image entrypoint can
+# stay the driver.
 if [ "$#" -eq 0 ]; then
 	echo "interop-driver ready"
 	while true; do
@@ -162,8 +163,7 @@ big_header_rejected)
 	set -e
 	if [ "$rc" -ne 0 ]; then
 		# A refused request may surface as a transport error rather than a
-		# status; status=0 tells the harness "no response", which counts as
-		# a conforming refusal.
+		# status.
 		emit_failure "big_header_refused"
 	fi
 	status=$(printf '%s' "$meta" | cut -d' ' -f1)
@@ -188,9 +188,7 @@ long_uri)
 	;;
 
 idle_reuse)
-	# curl opens a connection per invocation, so "reuse" here means the
-	# server must accept a fresh connection cleanly after a previous one has
-	# gone idle past its timeout.
+	# curl opens a connection per invocation...
 	sleep "$(awk "BEGIN{printf \"%.3f\", $IDLE_MS/1000}")"
 	set +e
 	meta=$("$CURL_BIN" $PROTO_FLAGS -sS --max-time 30 -o "$BODY" \

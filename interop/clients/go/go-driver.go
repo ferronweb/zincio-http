@@ -105,9 +105,10 @@ func doOnce(client *http.Client, method, url string, upload []byte, extra [][2]s
 		req.ContentLength = int64(len(upload))
 	}
 
-	// Observe informational responses. Go surfaces every 1xx through this
-	// hook on both HTTP/1.1 and HTTP/2, which is what lets this driver report
-	// 103 Early Hints -- something curl fundamentally cannot do.
+	// Observe informational responses.
+	//
+	// Go surfaces every 1xx through this hook on both HTTP/1.1 and HTTP/2,
+	// which is what lets this driver report 103 Early Hints (unlike curl).
 	var saw103 bool
 	trace := &httptrace.ClientTrace{
 		Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {

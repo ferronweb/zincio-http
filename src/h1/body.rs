@@ -369,7 +369,10 @@ where
             let mut req = httparse::Request::new(&mut []);
             let status = req
                 .parse_with_uninit_headers(&head, headers)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                .map_err(|e| match e {
+                    httparse::Error::TooManyHeaders => super::HeadTooLarge.into(),
+                    e => std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+                })?;
             if status.is_partial() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,

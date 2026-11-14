@@ -26,6 +26,35 @@ use tokio_util::sync::CancellationToken;
 use crate::{h1::writebuf::WriteBuf, EarlyHints, HttpProtocol, Incoming, Upgrade, Upgraded};
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+
+/// A request head over `max_header_size`, or with more fields than
+/// `max_header_count`: answered with an empty 431 instead of the error
+/// handler's page (RFC 6585 Section 5).
+#[derive(Debug)]
+pub(crate) struct HeadTooLarge;
+
+impl HeadTooLarge {
+    #[inline]
+    fn is(e: &std::io::Error) -> bool {
+        e.get_ref().is_some_and(|inner| inner.is::<Self>())
+    }
+}
+
+impl std::fmt::Display for HeadTooLarge {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("request head too large")
+    }
+}
+
+impl std::error::Error for HeadTooLarge {}
+
+impl From<HeadTooLarge> for std::io::Error {
+    #[inline]
+    fn from(e: HeadTooLarge) -> Self {
+        Self::new(std::io::ErrorKind::InvalidData, e)
+    }
+}
 const WRITE_BUF_BATCH_THRESHOLD: usize = 16384;
 
 /// An HTTP/1.x connection handler.
@@ -298,10 +327,7 @@ where
                 }
             }
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "request too large",
-        ))
+        Err(HeadTooLarge.into())
     }
 
     #[inline]
@@ -369,6 +395,19 @@ where
                 {
                     // HTTP/1.x abruptly closed when idle
                     return Ok(());
+                }
+                Ok(Some(Err(e))) if HeadTooLarge::is(&e) => {
+                    // A bare 431, not the error handler's page: that page is
+                    // written for a 400.
+                    let mut response = Response::new(Empty::<Bytes>::new());
+                    *response.status_mut() = http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE;
+                    response
+                        .headers_mut()
+                        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                    let _ = self
+                        .write_response(response, Version::HTTP_11, false, false, &mut zerocopy)
+                        .await;
+                    return Err(e);
                 }
                 Ok(Some(Err(e))) => {
                     if let Ok(mut response) = error_fn(false).await {

@@ -582,8 +582,12 @@ async fn test_header_size_limit_exceeded() {
             let mut response_buf = Vec::new();
             client_reader.read_to_end(&mut response_buf).await.unwrap();
 
-            // Expect 400 Bad Request
-            assert!(response_buf.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
+            // RFC 6585 Section 5: the head is too large, not malformed.
+            assert!(
+                response_buf.starts_with(b"HTTP/1.1 431 Request Header Fields Too Large\r\n"),
+                "{}",
+                String::from_utf8_lossy(&response_buf)
+            );
 
             let _ = server_task.await;
         })
@@ -1314,4 +1318,77 @@ async fn test_upgrade_downcast_gives_back_the_stream_and_what_was_read() {
             server_task.await.unwrap().unwrap();
         })
         .await
+}
+
+#[tokio::test]
+async fn test_header_count_limit_exceeded() {
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let (client_io, server_io) = tokio::io::duplex(1 << 16);
+
+            let server = Http1::new(
+                server_io,
+                Http1Options::new()
+                    .header_read_timeout(None)
+                    .max_header_count(4),
+            );
+            let server_task = tokio::task::spawn_local(server.handle(|_req| async {
+                Ok::<_, http::Error>(http::Response::new(Empty::<Bytes>::new()))
+            }));
+
+            let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+            let fields: String = (0..5).map(|i| format!("X-{i}: {i}\r\n")).collect();
+            let _ = client_writer
+                .write_all(format!("GET / HTTP/1.1\r\n{fields}\r\n").as_bytes())
+                .await;
+
+            let mut response_buf = Vec::new();
+            client_reader.read_to_end(&mut response_buf).await.unwrap();
+            assert!(
+                response_buf.starts_with(b"HTTP/1.1 431 Request Header Fields Too Large\r\n"),
+                "{}",
+                String::from_utf8_lossy(&response_buf)
+            );
+
+            let _ = server_task.await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_header_size_limit_exceeded_skips_the_error_page() {
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let (client_io, server_io) = tokio::io::duplex(1 << 16);
+
+            let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
+            let server_task = tokio::task::spawn_local(server.handle_with_error_fn(
+                |_req| async { Ok::<_, http::Error>(http::Response::new(Empty::<Bytes>::new())) },
+                |_is_timeout| async {
+                    http::Response::builder()
+                        .status(400)
+                        .body(Full::new(Bytes::from_static(b"bad request page")))
+                },
+            ));
+
+            let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+            let large = "x".repeat(32 * 1024);
+            let _ = client_writer
+                .write_all(
+                    format!("GET / HTTP/1.1\r\nHost: localhost\r\nX: {large}\r\n\r\n").as_bytes(),
+                )
+                .await;
+
+            let mut response_buf = Vec::new();
+            client_reader.read_to_end(&mut response_buf).await.unwrap();
+            let response = String::from_utf8_lossy(&response_buf);
+            assert!(
+                response.starts_with("HTTP/1.1 431 Request Header Fields Too Large\r\n"),
+                "{response}"
+            );
+            assert!(!response.contains("bad request page"), "{response}");
+
+            let _ = server_task.await;
+        })
+        .await;
 }

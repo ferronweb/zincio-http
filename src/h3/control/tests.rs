@@ -520,19 +520,6 @@ fn multi_byte_uni_stream_type_is_classified_incrementally() {
 }
 
 #[test]
-fn non_minimal_uni_stream_type_is_frame_error() {
-    let mut plane = ControlStreams::new(LocalSettings::default());
-    let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
-    peer.feed(&[0x40, 0x00]); // 0 encoded in 2 bytes: redundant
-    conn.peer_unis.push_back(Box::new(peer));
-
-    let err = drain_events(&mut plane, &mut conn).unwrap_err();
-    assert!(matches!(err, ControlError::Frame));
-    assert_eq!(err.h3_code(), 0x0106);
-}
-
-#[test]
 fn peer_encoder_stream_feeds_the_qpack_decoder() {
     let mut plane = ControlStreams::new(LocalSettings {
         qpack_max_table_capacity: 4096,

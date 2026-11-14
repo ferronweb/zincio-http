@@ -1,5 +1,11 @@
 # `zincio-http` change log
 
+## `zincio-http` UNRELEASED
+
+**Not yet released**
+
+- Fixed connections unexpectedly closed due to overly strict encoded integer varint validation (for example when using debug builds of LSQUIC).
+
 ## `zincio-http` 0.4.17
 
 **Released in November 11, 2026**

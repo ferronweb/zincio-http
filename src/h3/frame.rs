@@ -382,13 +382,13 @@ impl FrameDecoder {
     #[inline]
     pub fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
         loop {
-            let Some((ty, type_len)) = self.parse_varint_at(0)? else {
+            let Some((ty, type_len)) = self.parse_varint_at(0, true)? else {
                 return Ok(None);
             };
             if matches!(ty, 0x02 | 0x06 | 0x08 | 0x09) {
                 return Err(FrameError::Unexpected(ty));
             }
-            let Some((len, len_len)) = self.parse_varint_at(type_len)? else {
+            let Some((len, len_len)) = self.parse_varint_at(type_len, false)? else {
                 return Ok(None);
             };
             // Bound per-frame buffering before waiting for (or allocating)
@@ -454,7 +454,7 @@ impl FrameDecoder {
     /// decoder parses (and would otherwise accept or mismatch) them.
     #[inline]
     pub fn peek_frame_type(&self) -> Option<u64> {
-        match self.parse_varint_at(0) {
+        match self.parse_varint_at(0, true) {
             Ok(Some((ty, _))) => Some(ty),
             _ => None,
         }
@@ -473,7 +473,11 @@ impl FrameDecoder {
     }
 
     #[inline]
-    fn parse_varint_at(&self, offset: usize) -> Result<Option<(u64, usize)>, FrameError> {
+    fn parse_varint_at(
+        &self,
+        offset: usize,
+        frame_type: bool,
+    ) -> Result<Option<(u64, usize)>, FrameError> {
         if offset >= self.len {
             return Ok(None);
         }
@@ -487,7 +491,7 @@ impl FrameDecoder {
             let b = self.byte_at(offset + i).expect("offset + offest_len < len");
             value = (value << 8) | u64::from(b);
         }
-        if len > 1 && value < MIN_VARINT[usize::from(first >> 6)] {
+        if frame_type && len > 1 && value < MIN_VARINT[usize::from(first >> 6)] {
             return Err(FrameError::Frame);
         }
         Ok(Some((value, len)))
@@ -662,12 +666,8 @@ pub(crate) fn parse_varint(buf: &[u8]) -> Result<Option<(u64, usize)>, FrameErro
     for &byte in &buf[1..len] {
         value = (value << 8) | u64::from(byte);
     }
-    // Minimal encoding: the value must not fit in the next-smaller
-    // encoding. 2-byte values must be >= 2^6, 4-byte >= 2^14, 8-byte >=
-    // 2^30 (RFC 9000 Section 16).
-    if len > 1 && value < MIN_VARINT[usize::from(first >> 6)] {
-        return Err(FrameError::Frame);
-    }
+    // Don't do MIN_VARINT check (such overlong encodings are allowed per RFC 9000,
+    // except for frame types)
     Ok(Some((value, len)))
 }
 
@@ -1083,11 +1083,6 @@ mod tests {
         decoder.extend(Bytes::from_static(&[0x03, 0x02, 0x01, 0x00]));
         assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Frame);
 
-        // CANCEL_PUSH with a redundant 2-byte encoding of 5 -> H3_FRAME_ERROR.
-        let mut decoder = FrameDecoder::new();
-        decoder.extend(Bytes::from_static(&[0x03, 0x02, 0x40, 0x05]));
-        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Frame);
-
         // GOAWAY with a minimal 1-byte value parses.
         let mut decoder = FrameDecoder::new();
         decoder.extend(Bytes::from_static(&[0x07, 0x01, 0x05]));
@@ -1096,11 +1091,6 @@ mod tests {
         // Non-minimal type encoding (0 encoded in 2 bytes) -> error.
         let mut decoder = FrameDecoder::new();
         decoder.extend(Bytes::from_static(&[0x40, 0x00, 0x00]));
-        assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Frame);
-
-        // Non-minimal length encoding -> error.
-        let mut decoder = FrameDecoder::new();
-        decoder.extend(Bytes::from_static(&[0x00, 0x40, 0x00]));
         assert_eq!(decoder.next_frame().unwrap_err(), FrameError::Frame);
     }
 
@@ -1155,12 +1145,6 @@ mod tests {
             assert_eq!(n, wire.len());
         }
 
-        // Non-minimal encodings are rejected.
-        assert_eq!(parse_varint(&[0x40, 0x00]), Err(FrameError::Frame)); // 0 in 2 bytes
-        assert_eq!(
-            parse_varint(&[0x80, 0x00, 0x00, 0x40]),
-            Err(FrameError::Frame)
-        ); // 64 in 4 bytes
         assert_eq!(parse_varint(&[0x40, 0x40]), Ok(Some((64, 2))));
         // Truncated.
         assert_eq!(parse_varint(&[0x40]), Ok(None));

@@ -1,0 +1,10 @@
+# Vendored sources and build trees are rebuilt inside the image. Copying them
+# would inflate the context by hundreds of megabytes.
+boringssl/
+lsquic/
+# Out-of-tree lsquic
+lsquic-build/
+
+# Local build artefacts.
+*.o
+interop-driver-lsquic

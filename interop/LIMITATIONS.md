@@ -14,9 +14,9 @@ but no client can run it over some protocol), or a deliberate scope exclusion.
 
 Note the asymmetry this reveals: response-trailer observation is covered on
 every protocol (H1: none yet, see above; H2: hyper-h2, OkHttp, Node observe
-them but the scenario is gated on sending too; H3: aioquic, quic-go run the
-full scenario). Request-trailer sending is the uncovered half everywhere
-except H3.
+them but the scenario is gated on sending too; H3: aioquic, quic-go, quiche,
+and lsquic run the full scenario). Request-trailer sending is the uncovered
+half everywhere except H3.
 
 ## 2. Thin cells (exactly one runner)
 

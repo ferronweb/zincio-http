@@ -342,6 +342,47 @@ pub static QUICHE: ClientSpec = ClientSpec {
     build_context: Some("clients/quiche"),
 };
 
+/// lsquic over HTTP/3: LiteSpeed's QUIC stack, built against BoringSSL.
+///
+/// Unlike the other C clients here, lsquic exposes the HTTP/3 stream state
+/// directly (header-set callbacks plus raw stream reads), so it can observe
+/// both directions of trailer propagation and both interim-response kinds.
+/// The full H3 matrix is claimed.
+///
+/// The driver sends request trailers only after flushing the body: lsquic
+/// buffers body and header bytes together until packetization, and a trailer
+/// is encoded as a HEADERS frame at the current payload offset. Without the
+/// flush the DATA frame opened for the body would swallow the trailer block as
+/// payload, which is visible on the wire as an over-long DATA frame.
+pub static LSQUIC: ClientSpec = ClientSpec {
+    id: "lsquic",
+    name: "lsquic (HTTP/3)",
+    protocols: &[Protocol::Http3],
+    capabilities: &[
+        Capability::Upload,
+        Capability::ResponseTrailers,
+        Capability::RequestTrailers,
+        Capability::Concurrency,
+        Capability::Abort,
+        Capability::ExpectContinue,
+        Capability::EarlyHints,
+        Capability::BigHeader,
+        Capability::LongUri,
+        Capability::ManyHeaders,
+        Capability::IdleReuse,
+    ],
+    image: Some(ImageSpec::Build {
+        tag: "zincio-http-interop-lsquic",
+        context: "lsquic",
+        target: "driver",
+    }),
+    entrypoint: Some(Entrypoint {
+        program: "/usr/local/bin/interop-driver",
+        args: &[],
+    }),
+    build_context: Some("clients/lsquic"),
+};
+
 /// neqo over HTTP/3: Mozilla's QUIC stack used in Firefox.
 ///
 /// Its client is the stable, production-hardened side (the server exists only
@@ -351,7 +392,7 @@ pub static QUICHE: ClientSpec = ClientSpec {
 /// trailers are ignored (`TODO implement trailers, for now just ignore them`
 /// in `recv_message.rs`), so claiming either would turn a tooling limitation
 /// into a phantom server bug. The `trailers` scenario therefore stays covered
-/// by aioquic, quic-go, and quiche.
+/// by aioquic, quic-go, quiche, and lsquic.
 pub static NEQO: ClientSpec = ClientSpec {
     id: "neqo",
     name: "neqo (HTTP/3)",
@@ -390,6 +431,7 @@ pub static ALL_CLIENTS: &[&ClientSpec] = &[
     &OKHTTP,
     &NODE,
     &QUICHE,
+    &LSQUIC,
     &NEQO,
 ];
 

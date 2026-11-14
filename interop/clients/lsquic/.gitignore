@@ -1,0 +1,10 @@
+# Vendored upstream sources and out-of-tree build trees. The Dockerfile clones
+# pinned revisions, so these are local-development checkouts only.
+boringssl/
+lsquic/
+# Out-of-tree lsquic
+lsquic-build/
+
+# Local build artefacts.
+*.o
+interop-driver-lsquic

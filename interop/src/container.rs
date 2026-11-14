@@ -264,6 +264,7 @@ mod tests {
             "okhttp",
             "node",
             "quiche",
+            "lsquic",
             "neqo",
         ] {
             assert!(

@@ -221,7 +221,11 @@ where
             }
         }
         let chunk = self.read_buf.split_to(len).freeze();
-        self.read_buf.advance(2); // Ignore the trailing CRLF
+        if !chunk.is_empty() {
+            // Ignore the trailing CRLF, except for terminating chunks
+            // (this could interfere with trailers)
+            self.read_buf.advance(2);
+        }
         Ok(chunk)
     }
 
@@ -252,6 +256,7 @@ where
 
             if bytes_read >= 2 && self.read_buf[0] == b'\r' && self.read_buf[1] == b'\n' {
                 // No trailers, return None
+                self.read_buf.advance(2);
                 return Ok(None);
             }
 

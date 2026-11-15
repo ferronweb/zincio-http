@@ -345,16 +345,6 @@ fn parse_frame(
                 settings.push(Setting { id, value });
                 body = &body[6..];
             }
-            // The peer's announced SETTINGS_MAX_FRAME_SIZE governs what it
-            // may send; adopt it immediately so later frames in this
-            // buffer are checked against it.
-            if !ack {
-                for setting in &settings {
-                    if setting.id == 0x05 {
-                        decoder.set_max_frame_size(setting.value as usize);
-                    }
-                }
-            }
             Frame::Settings { ack, settings }
         }
         PUSH_PROMISE_TYPE => {

@@ -116,6 +116,7 @@ where
         }
         self.highest_stream_id = stream_id;
         if self.streams.len() as u32 >= self.opts.max_concurrent_streams {
+            self.mark_closed(stream_id);
             self.report_stream_error(
                 stream_id,
                 format!(

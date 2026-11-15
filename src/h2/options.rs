@@ -8,12 +8,6 @@ use crate::h2::codec::{
 ///
 /// Build one with [`Http2Options::default`] and override individual fields
 /// with the builder methods, then hand it to [`Http2::new`](crate::Http2::new).
-///
-/// Unlike the framing/header limits below, the connection window settings
-/// ([`initial_stream_window_size`](Http2Options::initial_stream_window_size)
-/// and [`initial_connection_window_size`](Http2Options::initial_connection_window_size))
-/// are advisory: a client may shrink them with its own `SETTINGS`, and the
-/// server honours the smaller value.
 #[derive(Debug, Clone)]
 pub struct Http2Options {
     /// Max time to wait for the client's preface before giving up.

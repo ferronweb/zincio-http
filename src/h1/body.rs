@@ -349,13 +349,15 @@ where
 
             let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
         }
+
+        // Trailers (always parse them, even when if they won't be used to prevent splitting)
+        let trailers = self.read_trailers().await?;
         if would_have_trailers {
-            // Trailers
-            let trailers = self.read_trailers().await?;
             if let Some(trailers) = trailers {
                 let _ = body_tx.send(Ok(http_body::Frame::trailers(trailers))).await;
             }
         }
+
         Ok(())
     }
 

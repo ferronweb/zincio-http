@@ -575,6 +575,17 @@ where
                 response
             };
 
+            if keep_alive
+                && response
+                    .headers()
+                    .get(header::CONNECTION)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|s| s.split(",").any(|t| t.trim().eq_ignore_ascii_case("close")))
+            {
+                // Keep-alive deliberately disabled
+                keep_alive = false;
+            }
+
             let mut was_upgraded = false;
             if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
                 was_upgraded = true;

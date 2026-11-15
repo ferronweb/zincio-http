@@ -8,6 +8,7 @@
 - Fixed HTTP/2 custom initial connection window size setting being applied incorrectly.
 - Improved 100 Continue response handling for HTTP/1.x
 - The library now needs a `unstable-internals` Cargo feature (disabled by default) to expose unstable HTTP/1.x and HTTP/2 protocol internals.
+- The HTTP/2 server now properly advertises maximum header list size setting.
 
 ## `zincio-http` 0.4.17
 

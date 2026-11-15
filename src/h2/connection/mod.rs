@@ -446,6 +446,10 @@ where
                     value: self.opts.max_frame_size,
                 },
                 Setting {
+                    id: 0x06,
+                    value: self.opts.max_header_list_size,
+                },
+                Setting {
                     id: 0x08,
                     value: if self.opts.enable_connect_protocol {
                         1

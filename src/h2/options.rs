@@ -142,7 +142,7 @@ impl Http2Options {
     }
 
     /// Sets the initial connection-level flow-control window size.
-    /// Defaults to `1_048_576`.
+    /// Defaults to `65_535`.
     #[inline]
     pub fn initial_connection_window_size(mut self, initial_connection_window_size: u32) -> Self {
         self.initial_connection_window_size = initial_connection_window_size;

@@ -409,7 +409,6 @@ where
             .set_max_header_list_size(self.opts.max_header_list_size as usize);
         self.decoder
             .set_max_frame_size(self.opts.max_frame_size as usize);
-        self.conn_window = self.opts.initial_connection_window_size as i64;
         // Resolved CONTINUATION-flood limit (CVE-2024-27919); `Http2Options`
         // already applies the safe default when none was configured.
         self.max_continuation_frames = options.max_continuation_frames;
@@ -456,6 +455,15 @@ where
                 },
             ],
         );
+        if let Some(window_update) = self
+            .opts
+            .initial_connection_window_size
+            .checked_sub(DEFAULT_CONNECTION_WINDOW_SIZE)
+            .filter(|us| *us != 0)
+        {
+            self.writer
+                .write_window_update(&mut self.out, 0, window_update);
+        }
         self.flush().await?;
 
         let (wake_tx, wake_rx) = kanal::bounded_async(1);

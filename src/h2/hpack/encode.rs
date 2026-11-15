@@ -63,6 +63,7 @@ impl Encoder {
 
     /// Controls Huffman-coded string literals. Enabled by default, in
     /// which case a literal is Huffman-coded when that is shorter.
+    #[cfg(any(test, feature = "unstable-internals"))]
     #[inline]
     pub fn set_use_huffman(&mut self, use_huffman: bool) {
         self.use_huffman = use_huffman;

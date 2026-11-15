@@ -12,7 +12,7 @@ pub mod encoder;
 pub mod error;
 
 pub use decoder::{Decoder, UnblockedSection};
-pub use encoder::{EncodedSection, Encoder};
+pub use encoder::Encoder;
 pub use error::QpackError;
 
 pub(crate) mod static_table;

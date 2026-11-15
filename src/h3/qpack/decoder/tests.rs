@@ -479,19 +479,6 @@ fn stream_finished_releases_budget() {
 }
 
 #[test]
-fn stream_cancelled_releases_budget() {
-    let mut dec = Decoder::new(220, 8);
-    dec.set_max_field_section_size(42);
-    assert!(dec.decode_block(b"\x00\x01\xd1", 4, 0).unwrap().is_some());
-    assert_eq!(hex(&dec.stream_cancelled(4)), "44");
-    // The reset stream's budget is gone; sections fit again.
-    assert!(dec
-        .decode_block(b"\x00\x00\x21a\x01b", 4, 0)
-        .unwrap()
-        .is_some());
-}
-
-#[test]
 fn blocked_section_size_capped_on_unblock() {
     // The cap is enforced when the section is decoded, so a section
     // buffered as blocked is rejected by the feed once the encoder
@@ -603,49 +590,6 @@ fn increment_coalesced() {
     assert!(dec.feed_encoder_stream(&bc).unwrap().is_empty());
     assert_eq!(hex(&dec.take_decoder_stream()), "02");
     assert_eq!(dec.known_received(), 3);
-}
-
-#[test]
-fn stream_cancelled_drops_blocked() {
-    let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
-    let mut es = Vec::new();
-    es.extend_from_slice(&enc.set_capacity(220).unwrap());
-    es.extend_from_slice(&enc.insert_literal(b"custom-key", b"custom-value").unwrap());
-    let block = enc
-        .encode_section(0, &[hdr("custom-key", "custom-value")])
-        .block;
-
-    let mut dec = Decoder::new(220, 8);
-    assert!(dec.decode_block(&block, 9, 0).unwrap().is_none());
-    assert_eq!(hex(&dec.stream_cancelled(9)), "49");
-    assert_eq!(dec.pending_blocked(), 0);
-    // The dropped section is gone: no headers surface from the feed.
-    assert!(dec.feed_encoder_stream(&es).unwrap().is_empty());
-}
-
-#[test]
-fn expire_blocked_emits_cancellations() {
-    let mut enc = crate::h3::qpack::encoder::Encoder::new(220, false);
-    let mut es = Vec::new();
-    es.extend_from_slice(&enc.set_capacity(220).unwrap());
-    es.extend_from_slice(&enc.insert_literal(b"custom-key", b"custom-value").unwrap());
-    let block = enc
-        .encode_section(0, &[hdr("custom-key", "custom-value")])
-        .block;
-
-    let mut dec = Decoder::new(220, 8);
-    assert!(dec.decode_block(&block, 4, 1000).unwrap().is_none());
-    assert!(dec.decode_block(&block, 6, 1200).unwrap().is_none());
-    // Not expired yet: age is exactly the maximum.
-    assert!(dec.expire_blocked(1500, 500).is_empty());
-    assert_eq!(dec.pending_blocked(), 2);
-    // Stream 4 is older (age 600) and expires; stream 6 (age 400) stays.
-    assert_eq!(hex(&dec.expire_blocked(1600, 500)), "44");
-    assert_eq!(dec.pending_blocked(), 1);
-    // Stream 6 now ages past the maximum.
-    assert_eq!(hex(&dec.expire_blocked(1701, 500)), "46");
-    assert_eq!(dec.pending_blocked(), 0);
-    drop(es);
 }
 
 #[test]

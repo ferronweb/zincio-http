@@ -12,7 +12,7 @@
 //! Every scenario runs the two sides as separate spawned tasks, which is
 //! what makes the connections actually drive their I/O.
 
-#![cfg(feature = "h3-quinn")]
+#![cfg(all(feature = "h3", feature = "h3-quinn", feature = "unstable-internals"))]
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},

@@ -40,6 +40,7 @@ use crate::hpack::{huffman, integer, HpackError};
 /// `1` + 7-bit stream ID: Section Acknowledgment (RFC 9204 4.4.1).
 const SECTION_ACK: u8 = 0x80;
 /// `01` + 6-bit stream ID: Stream Cancellation (RFC 9204 4.4.2).
+#[allow(dead_code)]
 const STREAM_CANCELLATION: u8 = 0x40;
 /// `00` + 6-bit increment: Insert Count Increment (RFC 9204 4.4.3).
 const INSERT_COUNT_INCREMENT: u8 = 0x00;
@@ -117,6 +118,7 @@ struct BlockedSection {
     stream_id: u64,
     buf: Bytes,
     ric: u64,
+    #[cfg(feature = "unstable-internals")]
     since: u64,
 }
 
@@ -278,6 +280,7 @@ impl Decoder {
     /// The total number of insertions and duplications materialized from the
     /// encoder stream so far; the decoder's Insert Count (RFC 9204
     /// Section 2.1.1).
+    #[cfg(any(test, feature = "unstable-internals"))]
     #[inline]
     pub fn inserted(&self) -> u64 {
         self.dynamic.inserted()
@@ -285,12 +288,14 @@ impl Decoder {
 
     /// The Known Received Count: insertions and duplications the decoder has
     /// acknowledged or incremented (RFC 9204 Section 2.1.4).
+    #[cfg(any(test, feature = "unstable-internals"))]
     #[inline]
     pub fn known_received(&self) -> u64 {
         self.known_received
     }
 
     /// The number of field sections currently buffered as blocked.
+    #[cfg(any(test, feature = "unstable-internals"))]
     #[inline]
     pub fn pending_blocked(&self) -> usize {
         self.blocked.len()
@@ -526,6 +531,9 @@ impl Decoder {
         stream_id: u64,
         now: u64,
     ) -> Result<Option<Vec<(Bytes, Bytes)>>, QpackError> {
+        #[cfg(not(feature = "unstable-internals"))]
+        let _ = now;
+
         let (ric, _, _) = self.read_prefix(buf)?;
         let stream_blocked = self.stream_has_blocked(stream_id);
         if ric > self.dynamic.inserted() || stream_blocked {
@@ -536,6 +544,7 @@ impl Decoder {
                 stream_id,
                 buf: Bytes::copy_from_slice(buf),
                 ric,
+                #[cfg(feature = "unstable-internals")]
                 since: now,
             });
             self.add_blocked_section(stream_id);
@@ -570,6 +579,7 @@ impl Decoder {
     /// Notifies that `stream_id` was reset or abandoned: buffered blocked
     /// sections for it are dropped and a Stream Cancellation instruction is
     /// queued (RFC 9204 Section 2.2.2.2). Returns the instruction.
+    #[cfg(feature = "unstable-internals")]
     #[inline]
     pub fn stream_cancelled(&mut self, stream_id: u64) -> Bytes {
         self.blocked.retain(|b| b.stream_id != stream_id);
@@ -584,6 +594,7 @@ impl Decoder {
     /// Drops blocked sections older than `max_age` in the caller's clock
     /// units, queueing one Stream Cancellation per affected stream. Returns
     /// the instructions.
+    #[cfg(feature = "unstable-internals")]
     #[inline]
     pub fn expire_blocked(&mut self, now: u64, max_age: u64) -> Bytes {
         let mut out = Vec::new();

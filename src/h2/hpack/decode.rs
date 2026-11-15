@@ -30,6 +30,7 @@ pub struct Decoder {
     max_table_size: usize,
     /// A size update queued by the protocol layer (SETTINGS) and applied
     /// at the start of the next decode.
+    #[cfg(feature = "unstable-internals")]
     queued_size_update: Option<usize>,
     /// Cap on the total size of a decoded header list (sum of name and
     /// value octets). Exceeding it is an error.
@@ -44,6 +45,7 @@ impl Decoder {
         Decoder {
             table: Table::with_max_size_no_maps(max_table_size),
             max_table_size,
+            #[cfg(feature = "unstable-internals")]
             queued_size_update: None,
             max_header_list_size: usize::MAX,
         }
@@ -51,6 +53,7 @@ impl Decoder {
 
     /// Queues a protocol-level table size update (from SETTINGS) to be
     /// applied at the start of the next header block.
+    #[cfg(feature = "unstable-internals")]
     #[inline]
     pub fn queue_size_update(&mut self, size: usize) {
         self.queued_size_update = Some(match self.queued_size_update {
@@ -76,6 +79,7 @@ impl Decoder {
     /// across calls.
     #[inline]
     pub fn decode(&mut self, buf: &[u8], list_size: &mut usize) -> Result<Vec<Header>, HpackError> {
+        #[cfg(feature = "unstable-internals")]
         if let Some(size) = self.queued_size_update.take() {
             self.max_table_size = size;
             // The table capacity itself is driven by size-update

@@ -2,8 +2,7 @@
 //! duplex streams, tap the wire bytes in both directions, and verify
 //! that the native frame codec (`zincio_http::h2::codec`) decodes the
 //! complete session, including the connection preface, settings
-//! exchange, HEADERS (with huffman-coded field blocks), DATA, and
-//! GOAWAY frames.
+//! exchange, DATA, and GOAWAY frames.
 
 #![cfg(all(feature = "h2", feature = "unstable-internals"))]
 

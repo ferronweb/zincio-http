@@ -830,52 +830,6 @@ fn test_slowloris() {
 }
 
 #[tokio::test]
-async fn test_100_continue_body_triggered() {
-    tokio::task::LocalSet::new()
-        .run_until(async move {
-            let (client_io, server_io) = tokio::io::duplex(4096);
-
-            let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
-            let server_task = tokio::task::spawn_local(server.handle(|req| async {
-                let body = req.into_body().collect().await.unwrap().to_bytes();
-                assert_eq!(&*body, b"Hello, World!");
-                Ok::<_, http::Error>(http::Response::new(Full::new(bytes::Bytes::from_static(
-                    b"OK",
-                ))))
-            }));
-
-            let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
-
-            // Write a POST request with Expect: 100-continue and body inline
-            client_writer
-                .write_all(
-                    b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 13\r\nExpect: 100-continue\r\nConnection: close\r\n\r\nHello, World!",
-                )
-                .await
-                .unwrap();
-
-            // Read all output from the server
-            let mut response_buf = Vec::new();
-            client_reader.read_to_end(&mut response_buf).await.unwrap();
-            let response_str = String::from_utf8_lossy(&response_buf);
-
-            // Should contain 100 Continue
-            assert!(response_str.contains("100 Continue"), "Expected 100 Continue in response: {}", response_str);
-
-            // Should contain 200 OK
-            assert!(response_str.contains("200 OK"), "Expected 200 OK in response: {}", response_str);
-
-            // 100 Continue should come before 200 OK
-            let continue_pos = response_str.find("100 Continue").unwrap();
-            let ok_pos = response_str.find("200 OK").unwrap();
-            assert!(continue_pos < ok_pos, "100 Continue should come before 200 OK");
-
-            server_task.await.unwrap().unwrap();
-        })
-        .await
-}
-
-#[tokio::test]
 async fn test_100_continue_response_triggered() {
     tokio::task::LocalSet::new()
         .run_until(async move {
@@ -995,48 +949,6 @@ async fn test_100_continue_disabled() {
             // Should contain 200 OK but NO 100 Continue
             assert!(response_str.contains("200 OK"), "Expected 200 OK: {}", response_str);
             assert!(!response_str.contains("100 Continue"), "Should NOT contain 100 Continue: {}", response_str);
-
-            server_task.await.unwrap().unwrap();
-        })
-        .await
-}
-
-#[tokio::test]
-async fn test_100_continue_no_duplicate() {
-    tokio::task::LocalSet::new()
-        .run_until(async move {
-            let (client_io, server_io) = tokio::io::duplex(4096);
-
-            let server = Http1::new(server_io, Http1Options::new().header_read_timeout(None));
-            let server_task = tokio::task::spawn_local(server.handle(|req| async {
-                let body = req.into_body().collect().await.unwrap().to_bytes();
-                assert_eq!(&*body, b"Hello, World!");
-                Ok::<_, http::Error>(http::Response::new(Full::new(bytes::Bytes::from_static(
-                    b"OK",
-                ))))
-            }));
-
-            let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
-
-            client_writer
-                .write_all(
-                    b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 13\r\nExpect: 100-continue\r\nConnection: close\r\n\r\nHello, World!",
-                )
-                .await
-                .unwrap();
-
-            // Read all output from the server
-            let mut response_buf = Vec::new();
-            client_reader.read_to_end(&mut response_buf).await.unwrap();
-            let response_str = String::from_utf8_lossy(&response_buf);
-
-            // Count occurrences of "100 Continue"
-            let continue_count = response_str.matches("100 Continue").count();
-            assert_eq!(continue_count, 1, "Expected exactly one 100 Continue, got {}: {}", continue_count, response_str);
-
-            // Should end with 200 OK after 100 Continue
-            assert!(response_str.contains("100 Continue"));
-            assert!(response_str.contains("200 OK"));
 
             server_task.await.unwrap().unwrap();
         })

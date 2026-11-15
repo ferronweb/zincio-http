@@ -487,27 +487,40 @@ where
             let upgraded = upgrade.upgraded.clone();
             request.extensions_mut().insert(upgrade);
 
-            let mut continue_sent = false;
             let mut response = {
+                let mut continue_sent = false;
+                // Use pin, so to not move continue_sent
+                let mut continue_sent_pin = std::pin::Pin::new(&mut continue_sent);
+
+                // Safety: self is used in two functions, both mutually-exclusive.
+                // Also, another function that would borrow self would write data,
+                // while this function would read data
+                let mut_self = unsafe { std::mem::transmute::<&mut Self, &mut Self>(&mut self) };
+                // Safety: continue_sent is used in two functions, both mutually-exclusive.
+                let mut_continue_sent =
+                    unsafe { std::mem::transmute::<&mut bool, &mut bool>(&mut continue_sent_pin) };
+
                 let read_body_fut = async {
                     if chunked {
-                        self.read_chunked_body_fn(
-                            body_tx,
-                            has_trailers,
-                            &send_continue_body,
-                            &mut continue_sent,
-                            version,
-                        )
-                        .await
+                        mut_self
+                            .read_chunked_body_fn(
+                                body_tx,
+                                has_trailers,
+                                &send_continue_body,
+                                mut_continue_sent,
+                                version,
+                            )
+                            .await
                     } else {
-                        self.read_body_fn(
-                            body_tx,
-                            content_length,
-                            &send_continue_body,
-                            &mut continue_sent,
-                            version,
-                        )
-                        .await
+                        mut_self
+                            .read_body_fn(
+                                body_tx,
+                                content_length,
+                                &send_continue_body,
+                                mut_continue_sent,
+                                version,
+                            )
+                            .await
                     }
                 };
                 let read_body_fut_pin = std::pin::pin!(read_body_fut);
@@ -540,22 +553,25 @@ where
                     ),
                 };
 
+                let response = response.map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                // Response-triggered 100 Continue, before draining remaining body to prevent
+                // deadlocks.
+                if !*continue_sent_pin
+                    && is_100_continue
+                    && !response.status().is_client_error()
+                    && !response.status().is_server_error()
+                {
+                    self.write_100_continue(version).await?;
+                }
+
                 // Drain away remaining body
                 if let Some(body_fut) = body_fut {
                     body_fut.await?;
                 }
 
-                response.map_err(|e| std::io::Error::other(e.to_string()))?
+                response
             };
-
-            // Response-triggered 100 Continue
-            if !continue_sent
-                && is_100_continue
-                && !response.status().is_client_error()
-                && !response.status().is_server_error()
-            {
-                self.write_100_continue(version).await?;
-            }
 
             let mut was_upgraded = false;
             if upgraded.load(std::sync::atomic::Ordering::Relaxed) {

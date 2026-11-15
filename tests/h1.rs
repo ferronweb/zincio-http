@@ -508,7 +508,7 @@ async fn test_invalid_request_line() {
             // Expect 400 Bad Request
             assert!(response_buf.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
 
-            let _ = server_task.await;
+            server_task.await.unwrap().unwrap_err();
         })
         .await
 }
@@ -543,7 +543,7 @@ async fn test_invalid_headers() {
             // Expect 400 Bad Request
             assert!(response_buf.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
 
-            let _ = server_task.await;
+            server_task.await.unwrap().unwrap_err();
         })
         .await
 }
@@ -585,7 +585,7 @@ async fn test_header_size_limit_exceeded() {
             // Expect 400 Bad Request
             assert!(response_buf.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
 
-            let _ = server_task.await;
+            server_task.await.unwrap().unwrap_err();
         })
         .await;
 }
@@ -649,7 +649,7 @@ async fn test_http_pipelining() {
                 "pipelined responses out of FIFO order: {response_buf:?}"
             );
 
-            let _ = server_task.await;
+            server_task.await.unwrap().unwrap();
         })
         .await;
 }
@@ -703,7 +703,7 @@ async fn test_early_hints_before_final_response() {
                 .windows(21)
                 .any(|w| w == b"\r\n\r\nHTTP/1.1 200 OK\r\n"));
 
-            let _ = server_task.await;
+            server_task.await.unwrap().unwrap();
         })
         .await;
 }
@@ -825,7 +825,7 @@ fn test_slowloris() {
             assert!(response_buf.starts_with(b"HTTP/1.1 408 Request Timeout\r\n"));
 
             client_task.cancel();
-            let _ = server_task.await;
+            server_task.await.unwrap_err();
         });
 }
 

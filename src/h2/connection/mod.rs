@@ -478,6 +478,7 @@ where
         let mut buf = [0u8; 8192];
         let mut wake_rx_drain = Vec::new();
         let mut close = false;
+        let mut idle_sleep = self.opts.idle_timeout.map(zincio::time::sleep);
         while !close && !((self.graceful || self.peer_goaway) && self.streams.is_empty()) {
             let wake_recv = wake_rx.recv().fuse();
             let read = tokio::io::AsyncReadExt::read(&mut self.io, &mut buf).fuse();
@@ -499,10 +500,9 @@ where
             // Idle timeout (RFC 9113 Section 10.5): no frame received from the
             // peer within `idle_timeout` => graceful shutdown. Recreated each
             // iteration so it measures the gap since the last received frame.
-            let timeout = self.opts.idle_timeout;
-            let idle_unfuse = std::pin::pin!(async move {
-                if let Some(d) = timeout {
-                    zincio::time::sleep(d).await;
+            let idle_unfuse = std::pin::pin!(async {
+                if let Some(s) = &mut idle_sleep {
+                    s.await;
                 } else {
                     futures_util::future::pending::<()>().await;
                 }
@@ -553,6 +553,9 @@ where
                     close = self.process_frames(&request_fn).await?;
                     self.drain_outbound();
                     self.flush().await?;
+                    if let (Some(s), Some(t)) = (&mut idle_sleep, self.opts.idle_timeout) {
+                        s.reset(std::time::Instant::now() + t);
+                    }
                 }
                 _ = wake_recv => {
                     // A stream task parked on a full channel; drain it.

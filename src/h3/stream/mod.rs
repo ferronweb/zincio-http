@@ -683,17 +683,20 @@ impl RequestStream {
     /// lets the transport write the QPACK output without copying it again.
     #[inline]
     fn encode_headers(&mut self, lines: &[(Bytes, Bytes)]) -> Result<(Bytes, Bytes), StreamError> {
-        let section = {
-            let mut encoder_guard = self.shared.encoder.lock();
-            let encoder = encoder_guard.as_mut().ok_or(StreamError::Message)?;
-            encoder.encode_section_with_ack_base(self.stream_id, lines)
-        };
-        let size = section.block.len() as u64;
+        // Max field section size would be of decoded (name + value + 32B overhead)
+        let size = lines.iter().fold(0u64, |acc, (k, v)| {
+            acc + k.len() as u64 + v.len() as u64 + 32
+        });
         if let Some(limit) = *self.shared.peer_max_field_section_size.lock() {
             if size > limit {
                 return Err(StreamError::HeadersTooBig { size, limit });
             }
         }
+        let section = {
+            let mut encoder_guard = self.shared.encoder.lock();
+            let encoder = encoder_guard.as_mut().ok_or(StreamError::Message)?;
+            encoder.encode_section_with_ack_base(self.stream_id, lines)
+        };
         let block = section.block;
         let encoder_stream = section.encoder_stream;
         if !encoder_stream.is_empty() {

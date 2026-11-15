@@ -58,8 +58,8 @@ impl Http1Options {
 
     /// Sets the maximum number of headers that will be parsed per request.
     ///
-    /// Headers beyond this count are silently ignored by the underlying
-    /// `httparse` parser. Defaults to **128**.
+    /// Headers beyond this count are rejected by the underlying `httparse`
+    /// parser. Defaults to **128**.
     pub fn max_header_count(mut self, count: usize) -> Self {
         self.max_header_count = count;
         self

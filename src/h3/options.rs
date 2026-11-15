@@ -70,7 +70,7 @@ impl Http3Options {
     /// must not exceed 2^30 - 1. Defaults to **`0`** (no dynamic table).
     #[inline]
     pub fn qpack_max_table_capacity(mut self, capacity: u64) -> Self {
-        self.local_settings.qpack_max_table_capacity = capacity;
+        self.local_settings.qpack_max_table_capacity = capacity.min(1_073_741_823);
         self
     }
 
@@ -124,8 +124,7 @@ impl Http3Options {
         self
     }
 
-    /// Sets the timeout for the initial HTTP/3 connection setup (QUIC
-    /// handshake and stream setup).
+    /// Sets the timeout for the initial QUIC handshake.
     ///
     /// If the setup does not complete within this duration, the handler
     /// returns an I/O timeout error. Pass `None` to disable this timeout.
@@ -139,7 +138,7 @@ impl Http3Options {
     /// Sets the timeout for reading the complete request head.
     ///
     /// If the client does not send a full set of request headers within this
-    /// duration the HTTP/2 stream is closed with `RST_STREAM`.
+    /// duration the HTTP/3 stream is closed with `RST_STREAM`.
     /// Pass `None` to disable the timeout entirely. Defaults to **30 seconds**.
     #[inline]
     pub fn header_read_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {

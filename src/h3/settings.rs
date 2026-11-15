@@ -117,10 +117,6 @@ impl LocalSettings {
     /// 7.2.4.1 recommends; receivers must ignore it.
     #[inline]
     pub fn to_frame(&self) -> FrameSettings {
-        debug_assert!(
-            self.qpack_max_table_capacity < (1 << 30),
-            "SETTINGS_QPACK_MAX_TABLE_CAPACITY above 2^30-1 (RFC 9204 Section 5)"
-        );
         let mut frame = FrameSettings::new();
         frame.insert(
             SETTINGS_QPACK_MAX_TABLE_CAPACITY,

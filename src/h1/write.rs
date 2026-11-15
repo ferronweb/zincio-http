@@ -27,11 +27,14 @@ where
     ) -> Result<(), std::io::Error> {
         // Date header
         if self.options.send_date_header {
-            response.headers_mut().insert(
-                header::DATE,
-                HeaderValue::from_str(self.get_date_header_value())
-                    .map_err(|e| std::io::Error::other(e.to_string()))?,
-            );
+            let headers = response.headers_mut();
+            if !headers.contains_key(header::DATE) {
+                headers.insert(
+                    header::DATE,
+                    HeaderValue::from_str(self.get_date_header_value())
+                        .map_err(|e| std::io::Error::other(e.to_string()))?,
+                );
+            }
         }
 
         // If the body has a size hint, set the Content-Length header if it's not already set

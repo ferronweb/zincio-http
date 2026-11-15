@@ -218,10 +218,6 @@ pub struct Connection<Io> {
     request_decoder: HpackDecoder,
     /// The peer's settings, updated by non-ACK SETTINGS frames.
     peer: PeerSettings,
-    /// The settings this connection announced (public RFC defaults
-    /// plus `SETTINGS_MAX_CONCURRENT_STREAMS`).
-    #[allow(dead_code)]
-    local: PeerSettings,
     /// Bounds the wait for the client's 24-octet preface. A peer that
     /// is too slow is disconnected without a GOAWAY.
     preface_timeout: Option<Duration>,
@@ -317,7 +313,6 @@ where
             encoder: Encoder::new(4096),
             request_decoder: HpackDecoder::new(4096),
             peer: PeerSettings::default(),
-            local: PeerSettings::default(),
             preface_timeout,
             header_read_timeout,
             streams: FxHashMap::default(),

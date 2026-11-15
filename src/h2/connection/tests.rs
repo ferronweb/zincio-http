@@ -330,7 +330,7 @@ fn local_reset_budget_closes_with_enhance_your_calm() {
     // ENHANCE_YOUR_CALM (RFC 9113 Section 10.5.2).
     let block = malformed_request_block();
     let script = [client_script(|w, out| {
-        for id in [1u32, 3, 5] {
+        for id in [1u32, 3, 5, 7] {
             w.write_headers(out, id, false, true, None, &block);
         }
     })]
@@ -364,7 +364,7 @@ fn local_reset_budget_can_be_disabled() {
     // own streams: one RST_STREAM per error, no GOAWAY.
     let block = malformed_request_block();
     let script = [client_script(|w, out| {
-        for id in [1u32, 3, 5, 7] {
+        for id in [1u32, 3, 5, 7, 9] {
             w.write_headers(out, id, false, true, None, &block);
         }
     })]
@@ -385,7 +385,7 @@ fn local_reset_budget_can_be_disabled() {
     );
     assert!(matches!(
         decoded.last(),
-        Some(Frame::Reset { stream_id: 7, .. })
+        Some(Frame::Reset { stream_id: 9, .. })
     ));
 }
 
@@ -409,7 +409,7 @@ fn pending_accept_reset_budget_closes_with_enhance_your_calm() {
     let (_client, server) = tokio::io::duplex(1 << 16);
     let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
     conn.opts.max_pending_accept_reset_streams = Some(2);
-    for id in [1u32, 3, 5] {
+    for id in [1u32, 3, 5, 7] {
         inject_pending_stream(&mut conn, id);
         conn.handle_reset_frame(id, Reason::Cancel.code());
     }
@@ -498,7 +498,7 @@ fn rapid_reset_after_dispatch_hits_budget() {
     let mut script = client_script(|_, _| {});
     {
         let writer = FrameWriter::new(DEFAULT_MAX_FRAME_SIZE);
-        for id in [1u32, 3, 5] {
+        for id in [1u32, 3, 5, 7] {
             writer.write_headers(&mut script, id, true, true, None, &block);
             writer.write_reset(&mut script, id, Reason::Cancel.code());
         }
@@ -529,7 +529,7 @@ fn dispatched_unresponded_reset_hits_budget_unit() {
     let (_client, server) = tokio::io::duplex(1 << 16);
     let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
     conn.opts.max_pending_accept_reset_streams = Some(2);
-    for id in [1u32, 3, 5] {
+    for id in [1u32, 3, 5, 7] {
         inject_dispatched_stream(&mut conn, id);
         conn.handle_reset_frame(id, Reason::Cancel.code());
     }
@@ -559,7 +559,7 @@ fn reset_after_response_started_does_not_hit_budget() {
         decoded.iter().all(|f| !matches!(f, Frame::GoAway { .. })),
         "no GOAWAY expected for post-response resets, got {decoded:?}"
     );
-    assert_eq!(conn.pending_accept_resets, 0);
+    assert_eq!(conn.pending_accept_resets, 0.0);
 }
 
 #[test]

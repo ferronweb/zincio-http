@@ -7,6 +7,7 @@
 - Fixed connections unexpectedly closed due to overly strict encoded integer varint validation (for example when using debug builds of LSQUIC).
 - Fixed HTTP/2 custom initial connection window size setting being applied incorrectly.
 - Fixed HTTP/2 idle timeout being applied incorrectly (timeout for any HTTP/2 server activity instead of intended HTTP/2 peer activity)
+- Fixed some HTTP/2 connections unexpectedly closing due to stream resets
 - Improved 100 Continue response handling for HTTP/1.x
 - The library now needs a `unstable-internals` Cargo feature (disabled by default) to expose unstable HTTP/1.x and HTTP/2 protocol internals.
 - The HTTP/2 server now properly advertises maximum header list size setting.

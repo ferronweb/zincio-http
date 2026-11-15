@@ -1,6 +1,9 @@
 use super::*;
 use smallvec::SmallVec;
 
+/// How fast the budget for streams reset before acceptance refills.
+const PENDING_ACCEPT_RESETS_PER_SECOND: f64 = 50.0;
+
 impl<Io> Connection<Io>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -530,21 +533,19 @@ where
             format!("reset by peer with code {error_code:#x} ({reason_name})"),
         );
         if !entry.response_started {
-            // The peer reset a stream before we produced any final
-            // response for it. This covers both streams whose request
-            // was never dispatched and dispatched streams cancelled
-            // before the handler responded (CVE-2023-44487 rapid
-            // reset): bound how many such streams a peer may churn
-            // through (RFC 9113 Section 10.5.2). Resets after a final
-            // response started (headers/data/trailers) are ordinary
-            // cancellations of in-flight work and do not count.
+            // Mitigate CVE-2023-44487 rapid reset
             if let Some(max) = self.opts.max_pending_accept_reset_streams {
-                if self.pending_accept_resets >= max {
+                if self.pending_accept_resets as usize >= max {
                     self.goaway(Reason::EnhanceYourCalm, b"too many resets before response");
                     return;
                 }
             }
-            self.pending_accept_resets += 1;
+
+            let now = std::time::Instant::now();
+            let elapsed = now.saturating_duration_since(self.pending_accept_since);
+            let drained = elapsed.as_secs_f64() * PENDING_ACCEPT_RESETS_PER_SECOND;
+            self.pending_accept_resets = (self.pending_accept_resets - drained).max(0.0) + 1.0;
+            self.pending_accept_since = now;
         }
         self.mark_closed(stream_id);
         // Unblock the task: the body reader reports the reset and the

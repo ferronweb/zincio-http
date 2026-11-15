@@ -244,7 +244,10 @@ pub struct Connection<Io> {
     /// Streams the peer reset before this endpoint produced a final
     /// response for them (bounded by
     /// `opts.max_pending_accept_reset_streams`).
-    pending_accept_resets: usize,
+    pending_accept_resets: f64,
+    /// When updated pending accept, used for token-bucket drain for
+    /// peer reset check.
+    pending_accept_since: std::time::Instant,
     /// Wakes the drive loop when a stream task fills its outbound
     /// channel; the loop drains channels between reads.
     wake_tx: Option<kanal::AsyncSender<()>>,
@@ -326,7 +329,8 @@ where
             closed_order: VecDeque::new(),
             opts: ConnectionOptions::default(),
             local_error_resets: 0,
-            pending_accept_resets: 0,
+            pending_accept_resets: 0.0,
+            pending_accept_since: std::time::Instant::now(),
             wake_tx: None,
             complete_blocks: VecDeque::new(),
             max_continuation_frames: 16,

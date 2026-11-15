@@ -18,8 +18,9 @@
 - The HTTP/1.x server now allows responses to intentionally set `Connection: close` to close HTTP/1.x connections.
 - The HTTP/1.x server now checks the sent response body size against declared `Content-Length` value.
 - The HTTP/1.x server now enforces a chunk size limit of 4096 bytes (similar to `net/http` in Go).
-- The HTTP/2 server now properly advertises maximum header list size setting.
 - The HTTP/2 server now immediately marks streams exceeding the concurrent stream limit as closed.
+- The HTTP/2 server now properly advertises maximum header list size setting.
+- The HTTP/3 server now checks the request body size against declared `Content-Length` value (similarly to the HTP/2 server).
 
 ## `zincio-http` 0.4.17
 

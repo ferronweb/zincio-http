@@ -159,6 +159,8 @@ pub(crate) struct H3Body {
     /// while the body is read (a trailer field section that fails to
     /// decode) can still close the connection.
     conn_state: Arc<parking_lot::Mutex<ConnResetState>>,
+    content_length: Option<u64>,
+    data_read: u64,
 }
 
 impl H3Body {
@@ -167,12 +169,15 @@ impl H3Body {
         stream: SharedRequest,
         send_continue_body: Option<Arc<AtomicBool>>,
         conn_state: Arc<parking_lot::Mutex<ConnResetState>>,
+        content_length: Option<u64>,
     ) -> Self {
         Self {
             stream,
             data_done: false,
             send_continue_body,
             conn_state,
+            content_length,
+            data_read: 0,
         }
     }
 }
@@ -189,6 +194,13 @@ impl Body for H3Body {
         // Safety: H3Body is Unpin (all fields are Unpin), so we can get &mut Self.
         let this = unsafe { self.get_unchecked_mut() };
 
+        if this.content_length.is_some_and(|cl| this.data_read > cl) {
+            return Poll::Ready(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "content length exceeded",
+            ))));
+        }
+
         if !this.data_done {
             loop {
                 let mut stream = match std::pin::pin!(this.stream.lock()).poll_unpin(cx) {
@@ -200,6 +212,7 @@ impl Body for H3Body {
                         if data.is_empty() {
                             continue;
                         }
+                        this.data_read += data.len() as u64;
                         return Poll::Ready(Some(Ok(BodyFrame::data(data))));
                     }
                     Poll::Ready(Ok(None)) => {
@@ -219,6 +232,13 @@ impl Body for H3Body {
                     }
                 };
             }
+        }
+
+        if this.content_length.is_some_and(|cl| this.data_read != cl) {
+            return Poll::Ready(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "content length doesn't match actual body size",
+            ))));
         }
 
         let mut stream = match std::pin::pin!(this.stream.lock()).poll_unpin(cx) {
@@ -479,7 +499,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
             poll_headers.await
         }
     };
-    let request = match request_headers {
+    let (request, content_length) = match request_headers {
         Ok(Some(request)) => request,
         // The stream ended without a request: nothing to respond to.
         Ok(None) => return,
@@ -538,6 +558,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                 Arc::clone(&stream),
                 send_continue_body.clone(),
                 Arc::clone(&conn_state),
+                content_length,
             ))),
             None,
         )

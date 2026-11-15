@@ -185,7 +185,7 @@ fn full_request_exchange() {
     let mut request = RequestStream::new(Box::new(stream), Arc::clone(&shared), false);
 
     let mut cx = cx();
-    let req = match request.poll_headers(&mut cx) {
+    let (req, _) = match request.poll_headers(&mut cx) {
         Poll::Ready(Ok(Some(request))) => request,
         other => panic!("expected request, got {other:?}"),
     };
@@ -236,7 +236,7 @@ fn request_without_body_is_finished_by_fin() {
     let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx = cx();
-    let req = match request.poll_headers(&mut cx) {
+    let (req, _) = match request.poll_headers(&mut cx) {
         Poll::Ready(Ok(Some(request))) => request,
         other => panic!("expected request, got {other:?}"),
     };
@@ -487,7 +487,7 @@ fn headers_blocked_then_unblocked_by_encoder_stream() {
         }
     }
 
-    let req = match request.poll_headers(&mut cx) {
+    let (req, _) = match request.poll_headers(&mut cx) {
         Poll::Ready(Ok(Some(request))) => request,
         other => panic!("expected unblocked request, got {other:?}"),
     };
@@ -752,7 +752,7 @@ fn connect_request_shape() {
     let mut request = RequestStream::new(Box::new(stream), shared, false);
 
     let mut cx1 = cx();
-    let req = match request.poll_headers(&mut cx1) {
+    let (req, _) = match request.poll_headers(&mut cx1) {
         Poll::Ready(Ok(Some(request))) => request,
         other => panic!("expected CONNECT request, got {other:?}"),
     };
@@ -794,7 +794,7 @@ fn connect_request_shape() {
     stream.feed(&wire);
     let mut request = RequestStream::new(Box::new(stream), Arc::clone(&shared), true);
     let mut cx2 = cx();
-    let req2 = match request.poll_headers(&mut cx2) {
+    let (req2, _) = match request.poll_headers(&mut cx2) {
         Poll::Ready(Ok(Some(request))) => request,
         other => panic!("expected extended CONNECT, got {other:?}"),
     };

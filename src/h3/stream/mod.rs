@@ -347,11 +347,12 @@ impl RequestStream {
     /// While the field section is blocked on a QPACK dynamic table entry,
     /// polls `Pending`; it returns once the control plane's processing of
     /// the peer's encoder stream unblocks it.
+    #[allow(clippy::type_complexity)]
     #[inline]
     pub(crate) fn poll_headers(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<Request<()>>, StreamError>> {
+    ) -> Poll<Result<Option<(Request<()>, Option<u64>)>, StreamError>> {
         if self.headers_blocked {
             let section = take_unblocked_for(&self.shared, self.stream_id, cx);
             if let Some(section) = section {
@@ -886,6 +887,36 @@ fn now() -> u64 {
         .as_nanos() as u64
 }
 
+/// Parses a content-length header value into a `u64`; anything but
+/// bare digits (optionally framed by OWS) is malformed.
+#[inline]
+fn parse_content_length(value: &[u8]) -> Result<u64, StreamError> {
+    let start = match value
+        .iter()
+        .position(|byte| *byte != b' ' && *byte != b'\t')
+    {
+        // Empty or all-whitespace.
+        None => return Err(StreamError::Message),
+        Some(start) => start,
+    };
+    let end = value
+        .iter()
+        .rposition(|byte| *byte != b' ' && *byte != b'\t')
+        .unwrap_or(start);
+    let value = &value[start..=end];
+    if value.is_empty() || value.iter().any(|byte| !byte.is_ascii_digit()) {
+        return Err(StreamError::Message);
+    }
+    let mut result: u64 = 0;
+    for &byte in value {
+        result = result
+            .checked_mul(10)
+            .and_then(|n| n.checked_add((byte - b'0') as u64))
+            .ok_or(StreamError::Message)?;
+    }
+    Ok(result)
+}
+
 /// Builds an `http::Request` from a decoded field section, enforcing the
 /// RFC 9114 Section 4.1 pseudo-header rules:
 ///
@@ -899,13 +930,14 @@ fn now() -> u64 {
 fn build_request(
     headers: Vec<(Bytes, Bytes)>,
     enable_connect: bool,
-) -> Result<Request<()>, StreamError> {
+) -> Result<(Request<()>, Option<u64>), StreamError> {
     let mut method = None;
     let mut scheme = None;
     let mut authority = None;
     let mut path = None;
     let mut protocol = None;
     let mut regular = Vec::new();
+    let mut content_length: Option<u64> = None;
     let mut pseudo_done = false;
 
     for (name, value) in headers {
@@ -927,6 +959,17 @@ fn build_request(
             pseudo_done = true;
             if connection_specific(&name, &value) {
                 return Err(StreamError::Message);
+            }
+            if name.as_ref() == b"content-length" {
+                let value = parse_content_length(value.as_ref())?;
+                if let Some(previous) = content_length {
+                    if previous != value {
+                        // Content-Length ambiguity
+                        return Err(StreamError::Message);
+                    }
+                } else {
+                    content_length = Some(value);
+                }
             }
             regular.push((
                 field_name(&name)?,
@@ -978,7 +1021,7 @@ fn build_request(
     {
         request.extensions_mut().insert(proto);
     }
-    Ok(request)
+    Ok((request, content_length))
 }
 
 #[inline]

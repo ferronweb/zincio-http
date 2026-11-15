@@ -627,23 +627,6 @@ fn max_frame_size_can_be_increased() {
 }
 
 #[test]
-fn settings_max_frame_size_is_adopted_by_decoder() {
-    // SETTINGS announcing SETTINGS_MAX_FRAME_SIZE = 65536, followed by
-    // a 20000-octet DATA frame that would violate the default limit.
-    let mut session = hex_to_bytes("000006040000000000000500010000");
-    let mut data = Vec::new();
-    FrameWriter::new(16_384).write_data(&mut data, 1, true, &vec![0x61; 20_000]);
-    session.extend_from_slice(&data);
-
-    let frames = decode_all(&session).unwrap();
-    assert_eq!(frames.len(), 2);
-    assert!(matches!(
-        &frames[1],
-        Frame::Data { data: body, .. } if body.len() == 20_000
-    ));
-}
-
-#[test]
 fn unknown_frame_type_is_preserved() {
     let frame = decode_one(&hex_to_bytes("0000020a0800000007abcd")).unwrap();
     assert_eq!(

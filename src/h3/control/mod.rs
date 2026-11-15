@@ -703,13 +703,14 @@ impl ControlStreams {
             return Err(ControlError::MissingSettings);
         }
         match frame {
-            Frame::Settings(settings) => {
+            Frame::Settings(mut settings) => {
                 if self.settings_received {
                     // RFC 9114 Section 7.2.4: a second SETTINGS frame is
                     // H3_FRAME_UNEXPECTED.
                     return Err(ControlError::FrameUnexpected);
                 }
                 self.settings_received = true;
+                settings.normalize();
                 self.peer.apply(&settings);
                 {
                     *self.shared.encoder.lock() = Some(Encoder::with_max_blocked(

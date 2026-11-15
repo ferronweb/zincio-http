@@ -178,6 +178,19 @@ impl Settings {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Normalizes the payload by clamping values so to be in valid ranges.
+    #[inline]
+    pub fn normalize(&mut self) {
+        if let Some(value) = self.lookup.get_mut(&SETTINGS_QPACK_MAX_TABLE_CAPACITY) {
+            *value = (*value).min(65536);
+        }
+        for (id, value) in &mut self.entries {
+            if *id == SETTINGS_QPACK_MAX_TABLE_CAPACITY {
+                *value = (*value).min(65536);
+            }
+        }
+    }
 }
 
 /// An HTTP/3 frame (RFC 9114 Section 7.2).

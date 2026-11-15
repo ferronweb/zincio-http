@@ -574,8 +574,10 @@ where
         for setting in settings {
             match setting.id {
                 0x01 => {
-                    self.peer.header_table_size = setting.value;
-                    self.encoder.queue_size_update(setting.value as usize);
+                    // Cap to 64KB to prevent OOM
+                    let header_table_size = setting.value.min(65536);
+                    self.peer.header_table_size = header_table_size;
+                    self.encoder.queue_size_update(header_table_size as usize);
                 }
                 0x02 => self.peer.enable_push = setting.value,
                 0x04 => {

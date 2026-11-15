@@ -444,8 +444,8 @@ async fn large_send_under_backpressure_is_not_duplicated() {
 
         let server_done = std::sync::Arc::new(tokio::sync::Notify::new());
         let client_done = std::sync::Arc::new(tokio::sync::Notify::new());
-        let server_done_tx = server_done.clone();
-        let client_done_rx = client_done.clone();
+        let server_done_tx = std::sync::Arc::clone(&server_done);
+        let client_done_rx = std::sync::Arc::clone(&client_done);
 
         let server_task = tokio::spawn(async move {
             let mut server = pair.server;

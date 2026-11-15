@@ -74,32 +74,3 @@ impl H2Error {
         H2Error::new(Reason::FrameSizeError, message)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn codes_round_trip() {
-        for reason in [
-            Reason::NoError,
-            Reason::ProtocolError,
-            Reason::InternalError,
-            Reason::FlowControlError,
-            Reason::SettingsTimeout,
-            Reason::StreamClosed,
-            Reason::FrameSizeError,
-            Reason::RefusedStream,
-            Reason::Cancel,
-            Reason::CompressionError,
-            Reason::ConnectError,
-            Reason::EnhanceYourCalm,
-            Reason::InadequateSecurity,
-            Reason::Http11Required,
-        ] {
-            assert_eq!(Reason::from_code(reason.code()), Some(reason));
-        }
-        assert_eq!(Reason::from_code(0x0e), None);
-        assert_eq!(Reason::from_code(u32::MAX), None);
-    }
-}

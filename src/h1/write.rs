@@ -45,22 +45,24 @@ where
             }
         }
 
-        let chunked = response
-            .headers()
-            .get(header::TRANSFER_ENCODING)
-            .map(|v| {
-                v.to_str().ok().is_some_and(|s| {
-                    s.split(',')
-                        .any(|s| s.trim().eq_ignore_ascii_case("chunked"))
+        // Responses with trailers must use chunked encoding...
+        let chunked = write_trailers
+            || response
+                .headers()
+                .get(header::TRANSFER_ENCODING)
+                .map(|v| {
+                    v.to_str().ok().is_some_and(|s| {
+                        s.split(',')
+                            .any(|s| s.trim().eq_ignore_ascii_case("chunked"))
+                    })
                 })
-            })
-            .unwrap_or_else(|| {
-                response
-                    .headers()
-                    .get(header::CONTENT_LENGTH)
-                    .and_then(|v| v.to_str().ok())
-                    .is_none_or(|s| s.parse::<u64>().is_err())
-            });
+                .unwrap_or_else(|| {
+                    response
+                        .headers()
+                        .get(header::CONTENT_LENGTH)
+                        .and_then(|v| v.to_str().ok())
+                        .is_none_or(|s| s.parse::<u64>().is_err())
+                });
 
         if chunked {
             response.headers_mut().insert(
@@ -73,6 +75,21 @@ where
                 .is_some()
             {}
         }
+
+        let content_length = if chunked {
+            None
+        } else {
+            response
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .map(|cl| {
+                    cl.to_str()
+                        .ok()
+                        .and_then(|cls| cls.parse::<u64>().ok())
+                        .ok_or_else(|| std::io::Error::other("invalid Content-Length value"))
+                })
+                .transpose()?
+        };
 
         let (parts, body, chunked) = if !is_head {
             let (parts, body) = response.into_parts();
@@ -113,12 +130,7 @@ where
         }
 
         if !chunked {
-            if let Some(content_length) = parts
-                .headers
-                .get(header::CONTENT_LENGTH)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-            {
+            if let Some(content_length) = content_length {
                 if let Some(zero_copy) = parts.extensions.get::<ZerocopyResponse>() {
                     if zerocopy.enabled() {
                         // Zerocopy
@@ -142,6 +154,7 @@ where
         if let Some(mut body) = body {
             let mut trailers_written = false;
             let mut first_chunk = true;
+            let mut body_len: u64 = 0;
             while let Some(chunk) = futures_util::select_biased! {
                 // Biased, to not flush the buffer before attempting to read the next chunk
 
@@ -164,6 +177,12 @@ where
                     Ok(data) => {
                         if data.is_empty() {
                             continue;
+                        }
+                        body_len += data.len() as u64;
+                        if content_length.is_some_and(|cl| body_len > cl) {
+                            return Err(std::io::Error::other(
+                                "body length exceeds Content-Length",
+                            ));
                         }
                         if chunked {
                             let mut chunk_size_buf = [0u8; 18];
@@ -188,6 +207,11 @@ where
                         }
                     }
                     Err(chunk) => {
+                        if content_length.is_some_and(|cl| body_len != cl) {
+                            return Err(std::io::Error::other(
+                                "body length is smaller than Content-Length",
+                            ));
+                        }
                         if let Ok(trailers) = chunk.into_trailers() {
                             if write_trailers {
                                 unsafe {
@@ -206,6 +230,11 @@ where
                         }
                     }
                 };
+            }
+            if content_length.is_some_and(|cl| body_len != cl) {
+                return Err(std::io::Error::other(
+                    "body length is smaller than Content-Length",
+                ));
             }
             if chunked && !trailers_written {
                 // Terminating chunk

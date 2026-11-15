@@ -14,7 +14,7 @@ http-body-util = "0.1.3"
 libfuzzer-sys = "0.4"
 tokio = "1.52.3"
 zincio = "0.2.10"
-zincio-http = { path = "..", features = ["h1","h2","h3"] }
+zincio-http = { path = "..", features = ["h1","h2","h3","unstable-internals"] }
 
 [[bin]]
 name = "http1"

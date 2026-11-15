@@ -13,19 +13,30 @@ mod date;
 mod error;
 mod frame;
 mod options;
+#[cfg(feature = "unstable-internals")]
 pub mod qpack;
+#[cfg(not(feature = "unstable-internals"))]
+mod qpack;
 #[cfg(feature = "h3-quinn")]
 pub mod quinn;
 mod settings;
 mod stream;
+#[cfg(feature = "unstable-internals")]
 pub mod transport;
+#[cfg(not(feature = "unstable-internals"))]
+mod transport;
 mod upgrade;
 
+#[cfg(feature = "unstable-internals")]
 pub use error::{H3Error, TransportError};
+#[cfg(not(feature = "unstable-internals"))]
+use error::{H3Error, TransportError};
+#[cfg(feature = "unstable-internals")]
 pub use frame::{
     Frame, FrameDecoder, FrameError, Settings, MAX_FRAME_PAYLOAD, MAX_SETTINGS_ENTRIES,
     MAX_SETTINGS_PAYLOAD,
 };
+
 pub use options::*;
 
 use std::{

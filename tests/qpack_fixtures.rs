@@ -6,7 +6,7 @@
 //! headers with this crate's encoder and round-trips them through a
 //! decoder. Gated on `--features h3`, which owns the QPACK module.
 
-#![cfg(feature = "h3")]
+#![cfg(all(feature = "h3", feature = "unstable-internals"))]
 
 use std::{
     collections::VecDeque,

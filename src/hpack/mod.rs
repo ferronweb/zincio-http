@@ -16,7 +16,7 @@ pub(crate) mod huffman;
 pub(crate) mod huffman_table;
 pub(crate) mod integer;
 
-#[cfg(feature = "h2")]
+#[cfg(all(feature = "unstable-internals", feature = "h2"))]
 pub use crate::h2::hpack::{Decoder, Encoder, Header};
 
 /// Errors produced by the shared HPACK/QPACK primitives.

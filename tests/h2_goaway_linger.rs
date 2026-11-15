@@ -4,7 +4,7 @@
 //! server's last frames. On a duplex stream the reset shows as the client's late write
 //! failing.
 
-#![cfg(feature = "h2")]
+#![cfg(all(feature = "h2", feature = "unstable-internals"))]
 
 use std::time::Duration;
 

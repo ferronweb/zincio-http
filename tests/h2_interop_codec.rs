@@ -5,7 +5,7 @@
 //! exchange, HEADERS (with huffman-coded field blocks), DATA, and
 //! GOAWAY frames.
 
-#![cfg(feature = "h2")]
+#![cfg(all(feature = "h2", feature = "unstable-internals"))]
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};

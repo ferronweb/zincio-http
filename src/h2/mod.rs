@@ -2,19 +2,44 @@ use http::{Request, Response};
 use http_body::Body;
 use tokio_util::sync::CancellationToken;
 
-use crate::h2::connection::{Connection, ConnectionOptions};
 use crate::h2::date::DateCache;
-use crate::h2::options::Http2Options;
 use crate::{HttpProtocol, Incoming, StreamErrorCallback};
 
-pub mod codec;
-pub mod connection;
 mod date;
-pub mod error;
-pub mod hpack;
-pub mod options;
 mod stream;
 mod upgrade;
+
+#[cfg(feature = "unstable-internals")]
+pub mod codec;
+#[cfg(not(feature = "unstable-internals"))]
+mod codec;
+
+#[cfg(feature = "unstable-internals")]
+pub mod connection;
+#[cfg(not(feature = "unstable-internals"))]
+mod connection;
+
+#[cfg(feature = "unstable-internals")]
+pub use connection::*;
+#[cfg(not(feature = "unstable-internals"))]
+use connection::*;
+
+#[cfg(feature = "unstable-internals")]
+pub mod error;
+#[cfg(not(feature = "unstable-internals"))]
+mod error;
+
+#[cfg(feature = "unstable-internals")]
+pub mod hpack;
+#[cfg(not(feature = "unstable-internals"))]
+mod hpack;
+
+#[cfg(feature = "unstable-internals")]
+pub mod options;
+#[cfg(not(feature = "unstable-internals"))]
+mod options;
+
+pub use options::Http2Options;
 
 pub(crate) use stream::H2Body;
 

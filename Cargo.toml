@@ -54,22 +54,22 @@ quinn = "0.11"
 
 [[bench]]
 name = "h2_hpack"
-required-features = ["h2"]
+required-features = ["h2", "unstable-internals"]
 harness = false
 
 [[bench]]
 name = "h3_qpack"
-required-features = ["h3"]
+required-features = ["h3", "unstable-internals"]
 harness = false
 
 [[bench]]
 name = "h2_hpack_large"
-required-features = ["h2"]
+required-features = ["h2", "unstable-internals"]
 harness = false
 
 [[bench]]
 name = "h3_qpack_large"
-required-features = ["h3"]
+required-features = ["h3", "unstable-internals"]
 harness = false
 
 [features]
@@ -79,6 +79,9 @@ h1-zerocopy = ["h1", "zincio/splice"]
 h2 = ["httpdate", "tokio-util", "pin-project-lite"]
 h3 = ["httpdate", "tokio-util"]
 h3-quinn = ["h3", "dep:quinn"]
+
+# Expose unstable HTTP/2 and HTTP/3 internals]
+unstable-internals = []
 
 [package.metadata.docs.rs]
 all-features = true

@@ -4,7 +4,7 @@
 //! `README.md` there for provenance and format. Decoder/encoder tests
 //! that consume the corpus are added by the HPACK implementation commits.
 
-#![cfg(feature = "h2")]
+#![cfg(all(feature = "h2", feature = "unstable-internals"))]
 
 use std::{
     fs,

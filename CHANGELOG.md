@@ -5,6 +5,7 @@
 **Not yet released**
 
 - Fixed connections unexpectedly closed due to overly strict encoded integer varint validation (for example when using debug builds of LSQUIC).
+- The library now needs a `unstable-internals` Cargo feature (disabled by default) to expose unstable HTTP/1.x and HTTP/2 protocol internals.
 
 ## `zincio-http` 0.4.17
 

@@ -69,17 +69,18 @@ mod h3;
 mod incoming;
 mod upgrade;
 
-#[cfg(any(feature = "h2", feature = "h3"))]
+#[cfg(all(any(feature = "h2", feature = "h3"), feature = "unstable-internals"))]
 pub mod hpack;
+#[cfg(all(
+    any(feature = "h2", feature = "h3"),
+    not(feature = "unstable-internals")
+))]
+mod hpack;
 
 pub use early_hints::*;
 pub use ext::*;
 #[cfg(feature = "h1")]
 pub use h1::*;
-#[cfg(feature = "h2")]
-pub use h2::connection::*;
-#[cfg(feature = "h2")]
-pub use h2::options::Http2Options;
 #[cfg(feature = "h2")]
 pub use h2::*;
 #[cfg(feature = "h3")]
@@ -99,8 +100,16 @@ use std::sync::Arc;
 pub type StreamErrorCallback = Arc<dyn Fn(std::io::Error) + Send + Sync + 'static>;
 
 /// Builds a stream-error [`std::io::Error`] with a human-readable message.
+#[cfg(feature = "unstable-internals")]
 #[inline]
 pub fn stream_error_io_error(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(message.into())
+}
+
+/// Builds a stream-error [`std::io::Error`] with a human-readable message.
+#[cfg(not(feature = "unstable-internals"))]
+#[inline]
+pub(crate) fn stream_error_io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
 }
 

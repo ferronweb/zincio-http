@@ -148,7 +148,7 @@ impl Http2Options {
     /// `2^24 - 1`.
     #[inline]
     pub fn max_frame_size(mut self, max_frame_size: u32) -> Self {
-        self.max_frame_size = max_frame_size;
+        self.max_frame_size = max_frame_size.clamp(16_384, 16_777_215);
         self
     }
 

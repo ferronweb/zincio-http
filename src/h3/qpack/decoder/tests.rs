@@ -667,12 +667,10 @@ fn eviction_into_unacknowledged_rejected() {
 }
 
 #[test]
-fn decoder_stream_section_ack_classifies_high_stream_id() {
-    // A Section Acknowledgment for stream ID 64 encodes to `0xC0`; the
-    // validation parser must accept it as a Section Acknowledgment
-    // (high bit set) rather than misreading it as an Insert Count
-    // Increment with a forbidden zero value (RFC 9204 Section 4.4.1).
+fn decoder_stream_section_instructions_are_accepted() {
+    // Decoder::feed_decoder_stream only validates...
     let mut dec = Decoder::new(0, 8);
+
     assert!(dec.feed_decoder_stream(&[0xC0]).is_ok());
     // Stream Cancellation (0x44 = Stream ID 4) and a non-zero Insert
     // Count Increment (0x01) validate too.
@@ -731,8 +729,8 @@ fn capacity_eviction_guard() {
     assert!(dec.feed_encoder_stream(&[0x3f, 0x03]).unwrap().is_empty());
     assert_eq!(dec.dynamic.len(), 1);
     assert_eq!(
-        dec.dynamic.get_absolute(1),
-        Some((b"b".as_slice(), b"b".as_slice()))
+        dec.dynamic.get_absolute_bytes(1),
+        Some((Bytes::from_static(b"b"), Bytes::from_static(b"b")))
     );
 }
 
@@ -774,8 +772,8 @@ fn encoder_stream_refs_evicted_entry() {
     assert!(dec.feed_encoder_stream(&[0x3f, 0x03]).unwrap().is_empty());
     assert_eq!(dec.dynamic.len(), 1);
     assert_eq!(
-        dec.dynamic.get_absolute(2),
-        Some((b"c".as_slice(), b"c".as_slice()))
+        dec.dynamic.get_absolute_bytes(2),
+        Some((Bytes::from_static(b"c"), Bytes::from_static(b"c")))
     );
     // An Insert with Name Reference to the evicted entry (relative
     // index 1, the second-newest at insert time) is rejected.

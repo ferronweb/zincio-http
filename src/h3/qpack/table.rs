@@ -287,47 +287,6 @@ impl DynamicTable {
         Ok(())
     }
 
-    /// Returns the (name, value) pair with the given absolute index.
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn get_absolute(&self, abs: u64) -> Option<(&[u8], &[u8])> {
-        let last = self.last_absolute();
-        if abs > last {
-            return None;
-        }
-        self.entry_at(last - abs)
-    }
-
-    /// Returns the (name, value) pair referenced by an encoder-stream
-    /// relative index: 0 is the most recently inserted entry.
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn get_relative(&self, index: u64) -> Option<(&[u8], &[u8])> {
-        self.entry_at(index)
-    }
-
-    /// Returns the (name, value) pair referenced by a field line
-    /// representation relative index: index 0 is the entry with absolute
-    /// index `base - 1`.
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn get_base_relative(&self, base: u64, index: u64) -> Option<(&[u8], &[u8])> {
-        if index >= base {
-            return None;
-        }
-        let abs = base - 1 - index;
-        self.get_absolute(abs)
-    }
-
-    /// Returns the (name, value) pair referenced by a post-base index:
-    /// index 0 is the entry with absolute index `base`.
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn get_post_base(&self, base: u64, index: u64) -> Option<(&[u8], &[u8])> {
-        base.checked_add(index)
-            .and_then(|abs| self.get_absolute(abs))
-    }
-
     /// Returns the (name, value) pair at deque position `i` (0 = most
     /// recently inserted).
     #[inline]
@@ -472,9 +431,15 @@ mod tests {
         insert(&mut table, ":path", "/").unwrap();
         assert_eq!(table.inserted(), 2);
         assert_eq!(table.last_absolute(), 1);
-        assert_eq!(table.get_absolute(0), Some((&b":method"[..], &b"GET"[..])));
-        assert_eq!(table.get_absolute(1), Some((&b":path"[..], &b"/"[..])));
-        assert_eq!(table.get_absolute(2), None);
+        assert_eq!(
+            table.get_absolute_bytes(0),
+            Some((Bytes::from_static(b":method"), Bytes::from_static(b"GET")))
+        );
+        assert_eq!(
+            table.get_absolute_bytes(1),
+            Some((Bytes::from_static(b":path"), Bytes::from_static(b"/")))
+        );
+        assert_eq!(table.get_absolute_bytes(2), None);
     }
 
     #[test]
@@ -484,10 +449,19 @@ mod tests {
         insert(&mut table, "b", "2").unwrap();
         insert(&mut table, "c", "3").unwrap();
 
-        assert_eq!(table.get_relative(0), Some((&b"c"[..], &b"3"[..])));
-        assert_eq!(table.get_relative(1), Some((&b"b"[..], &b"2"[..])));
-        assert_eq!(table.get_relative(2), Some((&b"a"[..], &b"1"[..])));
-        assert_eq!(table.get_relative(3), None);
+        assert_eq!(
+            table.get_relative_bytes(0),
+            Some((Bytes::from_static(b"c"), Bytes::from_static(b"3")))
+        );
+        assert_eq!(
+            table.get_relative_bytes(1),
+            Some((Bytes::from_static(b"b"), Bytes::from_static(b"2")))
+        );
+        assert_eq!(
+            table.get_relative_bytes(2),
+            Some((Bytes::from_static(b"a"), Bytes::from_static(b"1")))
+        );
+        assert_eq!(table.get_relative_bytes(3), None);
     }
 
     #[test]
@@ -503,9 +477,15 @@ mod tests {
         insert(&mut table, "c", "c").unwrap();
         assert_eq!(table.size(), 68);
         assert_eq!(table.len(), 2);
-        assert_eq!(table.get_absolute(0), None, "oldest entry evicted");
-        assert_eq!(table.get_absolute(1), Some((&b"b"[..], &b"b"[..])));
-        assert_eq!(table.get_absolute(2), Some((&b"c"[..], &b"c"[..])));
+        assert_eq!(table.get_absolute_bytes(0), None, "oldest entry evicted");
+        assert_eq!(
+            table.get_absolute_bytes(1),
+            Some((Bytes::from_static(b"b"), Bytes::from_static(b"b")))
+        );
+        assert_eq!(
+            table.get_absolute_bytes(2),
+            Some((Bytes::from_static(b"c"), Bytes::from_static(b"c")))
+        );
         // Absolute indices of evicted entries are never reused.
         assert_eq!(table.inserted(), 3);
     }
@@ -542,7 +522,10 @@ mod tests {
         table.set_capacity(1000);
         insert(&mut table, "fresh", "entry").unwrap();
         assert_eq!(table.len(), 1);
-        assert_eq!(table.get_absolute(5), Some((&b"fresh"[..], &b"entry"[..])));
+        assert_eq!(
+            table.get_absolute_bytes(5),
+            Some((Bytes::from_static(b"fresh"), Bytes::from_static(b"entry")))
+        );
     }
 
     #[test]
@@ -563,16 +546,43 @@ mod tests {
 
         let base = 8;
         // Relative: index 0 -> absolute 7, increasing indices go older.
-        assert_eq!(table.get_base_relative(base, 0), table.get_absolute(7));
-        assert_eq!(table.get_base_relative(base, 3), table.get_absolute(4));
-        assert_eq!(table.get_base_relative(base, 5), table.get_absolute(2));
-        assert_eq!(table.get_base_relative(base, 5), None, "evicted entry");
-        assert_eq!(table.get_base_relative(base, 8), None, "index >= base");
+        assert_eq!(
+            table.get_base_relative_bytes(base, 0),
+            table.get_absolute_bytes(7)
+        );
+        assert_eq!(
+            table.get_base_relative_bytes(base, 3),
+            table.get_absolute_bytes(4)
+        );
+        assert_eq!(
+            table.get_base_relative_bytes(base, 5),
+            table.get_absolute_bytes(2)
+        );
+        assert_eq!(
+            table.get_base_relative_bytes(base, 5),
+            None,
+            "evicted entry"
+        );
+        assert_eq!(
+            table.get_base_relative_bytes(base, 8),
+            None,
+            "index >= base"
+        );
 
         // Post-base: index 0 -> absolute 8, increasing indices go newer.
-        assert_eq!(table.get_post_base(base, 0), table.get_absolute(8));
-        assert_eq!(table.get_post_base(base, 1), table.get_absolute(9));
-        assert_eq!(table.get_post_base(base, 2), None, "beyond newest entry");
+        assert_eq!(
+            table.get_post_base_bytes(base, 0),
+            table.get_absolute_bytes(8)
+        );
+        assert_eq!(
+            table.get_post_base_bytes(base, 1),
+            table.get_absolute_bytes(9)
+        );
+        assert_eq!(
+            table.get_post_base_bytes(base, 2),
+            None,
+            "beyond newest entry"
+        );
     }
 
     #[test]
@@ -581,16 +591,22 @@ mod tests {
         insert(&mut table, "cookie", "a=b").unwrap();
         insert(&mut table, "cookie", "a=b").unwrap();
         assert_eq!(table.len(), 2);
-        assert_eq!(table.get_absolute(0), Some((&b"cookie"[..], &b"a=b"[..])));
-        assert_eq!(table.get_absolute(1), Some((&b"cookie"[..], &b"a=b"[..])));
+        assert_eq!(
+            table.get_absolute_bytes(0),
+            Some((Bytes::from_static(b"cookie"), Bytes::from_static(b"a=b")))
+        );
+        assert_eq!(
+            table.get_absolute_bytes(1),
+            Some((Bytes::from_static(b"cookie"), Bytes::from_static(b"a=b")))
+        );
     }
 
     #[test]
     fn empty_table_lookups_return_none() {
         let table = DynamicTable::new(1000);
-        assert_eq!(table.get_absolute(0), None);
-        assert_eq!(table.get_relative(0), None);
-        assert_eq!(table.get_base_relative(0, 0), None);
-        assert_eq!(table.get_post_base(0, 0), None);
+        assert_eq!(table.get_absolute_bytes(0), None);
+        assert_eq!(table.get_relative_bytes(0), None);
+        assert_eq!(table.get_base_relative_bytes(0, 0), None);
+        assert_eq!(table.get_post_base_bytes(0, 0), None);
     }
 }

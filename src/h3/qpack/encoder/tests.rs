@@ -15,12 +15,6 @@ fn hex(bytes: &[u8]) -> String {
 
 #[test]
 fn decoder_stream_section_ack_classifies_high_stream_id() {
-    // A Section Acknowledgment for stream ID 64 encodes to `0xC0`
-    // (top bit set, 0x40 bit also set by the 7-bit Stream ID). The
-    // instruction is identified by the high bit alone; misclassifying
-    // it as an Insert Count Increment (which rejects a zero value)
-    // was a latent bug that only surfaced for stream IDs at or above
-    // 64 (RFC 9204 Section 4.4.1).
     let mut enc = Encoder::new(256, false);
     enc.encode_section(64, &[hdr("a", "b")]);
     assert!(enc.pending_refs.iter().any(|(id, _)| *id == 64));
@@ -113,8 +107,11 @@ fn vector_b3_insert_literal_name() {
     );
     assert_eq!(enc.dynamic.len(), 1);
     assert_eq!(
-        enc.dynamic.get_absolute(0),
-        Some((b"custom-key".as_slice(), b"custom-value".as_slice()))
+        enc.dynamic.get_absolute_bytes(0),
+        Some((
+            Bytes::from_static(b"custom-key"),
+            Bytes::from_static(b"custom-value")
+        ))
     );
 }
 

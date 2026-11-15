@@ -205,7 +205,7 @@ where
         // `Arc` so the spawned task can own a cheap clone.
         let shared = std::sync::Arc::new(request_fn);
 
-        let connection = Connection::with_header_timeout(
+        let connection = Connection::new(
             self.io_to_handshake
                 .ok_or_else(|| std::io::Error::other("no io to handshake"))?,
             preface_timeout,

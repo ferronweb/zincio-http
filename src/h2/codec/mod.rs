@@ -170,6 +170,7 @@ impl FrameDecoder {
     }
 
     /// The maximum frame payload size the peer may send.
+    #[cfg(feature = "unstable-internals")]
     #[inline]
     pub fn max_frame_size(&self) -> usize {
         self.max_frame_size
@@ -652,6 +653,7 @@ impl FrameWriter {
         self.write_continuation(out, stream_id, true, rest);
     }
 
+    #[cfg(any(test, feature = "unstable-internals"))]
     #[inline]
     pub fn write_priority(&self, out: &mut Vec<u8>, stream_id: u32, priority: Priority) {
         let dep =
@@ -681,6 +683,7 @@ impl FrameWriter {
         FrameWriter::header(out, 0, SETTINGS_TYPE, FLAG_ACK, 0);
     }
 
+    #[cfg(any(test, feature = "unstable-internals"))]
     #[inline]
     pub fn write_push_promise(
         &self,
@@ -700,6 +703,7 @@ impl FrameWriter {
         out.extend_from_slice(block);
     }
 
+    #[cfg(any(test, feature = "unstable-internals"))]
     #[inline]
     pub fn write_ping(&self, out: &mut Vec<u8>, payload: &[u8; 8]) {
         FrameWriter::header(out, 8, PING_TYPE, 0, 0);

@@ -302,15 +302,9 @@ impl<Io> Connection<Io>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    /// Creates a connection over `io`.
-    #[inline]
-    pub fn new(io: Io, preface_timeout: Option<Duration>) -> Connection<Io> {
-        Self::with_header_timeout(io, preface_timeout, None)
-    }
-
     /// Creates a connection osver `io`, with header read timeout.
     #[inline]
-    pub fn with_header_timeout(
+    pub fn new(
         io: Io,
         preface_timeout: Option<Duration>,
         header_read_timeout: Option<Duration>,
@@ -387,22 +381,6 @@ where
             ));
             callback(error);
         }
-    }
-
-    /// Drives a connection that never serves requests: the preface
-    /// handshake, SETTINGS/PING maintenance and error handling, but no
-    /// request dispatch (any request stream is refused).
-    ///
-    /// Equivalent to [`Connection::handle`] with a handler that never
-    /// completes; kept for tests and for callers that only want the
-    /// connection-level behavior.
-    #[inline]
-    pub async fn drive(self) -> std::io::Result<()> {
-        self.handle(
-            Arc::new(|_| std::future::pending::<Result<Response<Incoming>, std::io::Error>>()),
-            ConnectionOptions::default(),
-        )
-        .await
     }
 
     /// Serves requests to completion: peer EOF, GOAWAY received,

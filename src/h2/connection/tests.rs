@@ -46,7 +46,7 @@ fn run_connection_with(
             let script = script;
 
             let server = zincio::spawn(async move {
-                let conn = Connection::new(server_end, preface_timeout);
+                let conn = Connection::new(server_end, preface_timeout, None);
                 let _ = conn
                     .handle(
                         Arc::new(|_| {
@@ -258,7 +258,7 @@ fn window_update_overflow_is_connection_error() {
     // A WINDOW_UPDATE that pushes the connection window past 2^31-1
     // is a FLOW_CONTROL_ERROR connection error (RFC 9113 6.9.1).
     let (_client, server) = tokio::io::duplex(1 << 16);
-    let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+    let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
     conn.handle_window_update(0, 0x7fff_ffff);
     let decoded = decode_frames(&conn.out);
     assert!(decoded.iter().any(|f| matches!(
@@ -272,7 +272,7 @@ fn stream_window_update_overflow_is_stream_error() {
     // A WINDOW_UPDATE that overflows a single stream's window is a
     // RST_STREAM with FLOW_CONTROL_ERROR (RFC 9113 6.9.1).
     let (_client, server) = tokio::io::duplex(1 << 16);
-    let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+    let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
     // Open a stream so it has a flow-control window.
     let (reset_tx, _) = kanal::bounded_async::<u32>(1);
     let (_, msg_rx) = kanal::bounded_async::<StreamMsg>(1);
@@ -296,7 +296,7 @@ fn graceful_shutdown_queues_goaway() {
         .unwrap()
         .block_on(async {
             let (_client, server) = tokio::io::duplex(1 << 16);
-            let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+            let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
             conn.begin_graceful_shutdown();
             assert!(conn.graceful);
             conn.finish_graceful_shutdown();
@@ -407,7 +407,7 @@ fn pending_accept_reset_budget_closes_with_enhance_your_calm() {
     // 9113 Section 10.5.2): on exceeding it the connection closes
     // with ENHANCE_YOUR_CALM.
     let (_client, server) = tokio::io::duplex(1 << 16);
-    let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+    let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
     conn.opts.max_pending_accept_reset_streams = Some(2);
     for id in [1u32, 3, 5] {
         inject_pending_stream(&mut conn, id);
@@ -429,7 +429,7 @@ fn pending_accept_reset_budget_closes_with_enhance_your_calm() {
 #[test]
 fn pending_accept_reset_budget_can_be_disabled() {
     let (_client, server) = tokio::io::duplex(1 << 16);
-    let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+    let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
     conn.opts.max_pending_accept_reset_streams = None;
     for id in [1u32, 3, 5, 7, 9] {
         inject_pending_stream(&mut conn, id);
@@ -527,7 +527,7 @@ fn dispatched_unresponded_reset_hits_budget_unit() {
     // Unit-level: dispatched streams with no final response count, even
     // though `request_started` is true.
     let (_client, server) = tokio::io::duplex(1 << 16);
-    let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+    let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
     conn.opts.max_pending_accept_reset_streams = Some(2);
     for id in [1u32, 3, 5] {
         inject_dispatched_stream(&mut conn, id);
@@ -548,7 +548,7 @@ fn reset_after_response_started_does_not_hit_budget() {
     // Resets after a final response started are ordinary cancellations
     // of in-flight work and must not consume the rapid-reset budget.
     let (_client, server) = tokio::io::duplex(1 << 16);
-    let mut conn = Connection::new(server, Some(Duration::from_secs(5)));
+    let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
     conn.opts.max_pending_accept_reset_streams = Some(2);
     for id in [1u32, 3, 5, 7, 9] {
         inject_responded_stream(&mut conn, id);
@@ -630,7 +630,7 @@ fn stream_error_callback_reports_malformed_request() {
         .block_on(async move {
             let (client_end, server_end) = tokio::io::duplex(1 << 16);
             let server = zincio::spawn(async move {
-                let conn = Connection::new(server_end, Some(Duration::from_secs(5)))
+                let conn = Connection::new(server_end, Some(Duration::from_secs(5)), None)
                     .with_stream_error_callback(std::sync::Arc::new(
                         move |error: std::io::Error| {
                             errors_clone.lock().unwrap().push(error.to_string());
@@ -705,7 +705,7 @@ fn connection_error_is_returned_as_err() {
         .block_on(async move {
             let (client_end, server_end) = tokio::io::duplex(1 << 16);
             let server = zincio::spawn(async move {
-                let conn = Connection::new(server_end, Some(Duration::from_secs(5)));
+                let conn = Connection::new(server_end, Some(Duration::from_secs(5)), None);
                 conn.handle(
                     Arc::new(|_| {
                         std::future::pending::<Result<Response<Incoming>, std::io::Error>>()
@@ -741,7 +741,7 @@ fn invalid_preface_is_returned_as_err() {
         .block_on(async move {
             let (client_end, server_end) = tokio::io::duplex(1 << 16);
             let server = zincio::spawn(async move {
-                let conn = Connection::new(server_end, Some(Duration::from_secs(5)));
+                let conn = Connection::new(server_end, Some(Duration::from_secs(5)), None);
                 conn.handle(
                     Arc::new(|_| {
                         std::future::pending::<Result<Response<Incoming>, std::io::Error>>()

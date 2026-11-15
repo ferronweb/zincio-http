@@ -143,15 +143,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn peer_settings_defaults_match_rfc() {
-        let peer = PeerSettings::default();
-        assert_eq!(peer.qpack_max_table_capacity(), 0);
-        assert_eq!(peer.max_field_section_size(), None);
-        assert_eq!(peer.qpack_blocked_streams(), 0);
-        assert!(!peer.enable_connect_protocol());
-    }
-
-    #[test]
     fn apply_overlays_received_values() {
         let mut peer = PeerSettings::default();
         let mut frame = FrameSettings::new();

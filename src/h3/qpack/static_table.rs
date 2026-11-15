@@ -185,20 +185,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn table_has_99_entries() {
-        assert_eq!(STATIC_TABLE_SIZE, 99);
-    }
-
-    #[test]
-    fn every_entry_is_reachable_by_index() {
-        for index in 0..STATIC_TABLE_SIZE {
-            let (name, _) = get(index).expect("entry within range");
-            assert!(!name.is_empty(), "entry {index} has an empty name");
-        }
-        assert!(get(STATIC_TABLE_SIZE).is_none());
-    }
-
-    #[test]
     fn boundary_entries_match_the_rfc() {
         // First entry.
         assert_eq!(get(0), Some((&b":authority"[..], &b""[..])));

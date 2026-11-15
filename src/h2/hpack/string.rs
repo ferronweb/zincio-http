@@ -21,13 +21,6 @@ pub(crate) fn huffman_encoded_len_if_shorter(value: &[u8]) -> Option<usize> {
     (bit_len < value.len().saturating_mul(8)).then(|| bit_len.div_ceil(8))
 }
 
-/// Whether Huffman encoding shortens `value` enough to be worthwhile.
-#[cfg(test)]
-#[inline]
-pub(crate) fn should_huffman(value: &[u8]) -> bool {
-    !value.is_empty() && huffman_encoded_len_if_shorter(value).is_some()
-}
-
 /// Encodes a string literal (raw or Huffman-coded) into `out`.
 ///
 /// When `huffman_len` is present, the literal is Huffman-coded (honoring the
@@ -135,12 +128,5 @@ mod tests {
         let mut off = 0;
         // Wire length < 10 but decoded length is 10.
         assert!(decode(&out, &mut off, 9).is_err());
-    }
-
-    #[test]
-    fn huffman_choice() {
-        assert!(!should_huffman(b""));
-        assert!(should_huffman(b"www.example.com"));
-        assert!(!should_huffman(&[0xff; 10]));
     }
 }

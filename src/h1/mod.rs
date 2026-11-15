@@ -533,7 +533,7 @@ where
                 let select_either =
                     futures_util::future::select(read_body_fut_pin, select_read_body_either).await;
 
-                let (response, body_fut) = match select_either {
+                let (response, mut body_fut) = match select_either {
                     futures_util::future::Either::Left((result, request_fut)) => {
                         result?;
                         (
@@ -557,12 +557,14 @@ where
 
                 // Response-triggered 100 Continue, before draining remaining body to prevent
                 // deadlocks.
-                if !*continue_sent_pin
-                    && is_100_continue
-                    && !response.status().is_client_error()
-                    && !response.status().is_server_error()
-                {
-                    self.write_100_continue(version).await?;
+                if !*continue_sent_pin && is_100_continue {
+                    if !response.status().is_client_error() && !response.status().is_server_error()
+                    {
+                        self.write_100_continue(version).await?;
+                    } else {
+                        // The client would withdraw sending the request body...
+                        let _ = body_fut.take();
+                    }
                 }
 
                 // Drain away remaining body

@@ -10,6 +10,7 @@
 - Fixed HTTP/2 client being able to break max frame size setting on the server by setting in on the client side on SETTINGS frame.
 - Fixed HTTP/2 custom initial connection window size setting being applied incorrectly.
 - Fixed HTTP/2 idle timeout being applied incorrectly (timeout for any HTTP/2 server activity instead of intended HTTP/2 peer activity)
+- Fixed possible HPACK dynamic table desynchronization caused by stream reset while decoding a HEADERS frame.
 - Fixed some HTTP/2 connections unexpectedly closing due to stream resets
 - Improved 100 Continue response handling for HTTP/1.x
 - The library now needs a `unstable-internals` Cargo feature (disabled by default) to expose unstable HTTP/1.x and HTTP/2 protocol internals.

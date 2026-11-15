@@ -137,14 +137,18 @@ impl Decoder {
                     let (_, value) = string::decode(buf, &mut off, self.max_header_list_size)?;
 
                     *list_size += name.len() + value.len();
-                    if *list_size > self.max_header_list_size {
-                        return Err(HpackError::HeaderListTooLarge);
-                    }
 
                     let header = Header::new(name, value);
                     if rep == Representation::LiteralWithIndexing {
                         self.table.add(header.clone());
                     }
+
+                    // Check the list size after adding a header field, so to not
+                    // desynchronize tables when an operation errors out
+                    if *list_size > self.max_header_list_size {
+                        return Err(HpackError::HeaderListTooLarge);
+                    }
+
                     headers.push(header);
                 }
                 Representation::SizeUpdate => {

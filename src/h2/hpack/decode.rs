@@ -104,7 +104,7 @@ impl Decoder {
                     can_resize = false;
                     let index = integer::decode(buf, &mut off, 7, byte)? as usize;
                     let entry = self.table.get(index).ok_or(HpackError::InvalidIndex)?;
-                    *list_size += entry.name().len() + entry.value().len();
+                    *list_size += entry.size();
                     if *list_size > self.max_header_list_size {
                         return Err(HpackError::HeaderListTooLarge);
                     }
@@ -136,9 +136,8 @@ impl Decoder {
 
                     let (_, value) = string::decode(buf, &mut off, self.max_header_list_size)?;
 
-                    *list_size += name.len() + value.len();
-
                     let header = Header::new(name, value);
+                    *list_size += header.size();
                     if rep == Representation::LiteralWithIndexing {
                         self.table.add(header.clone());
                     }

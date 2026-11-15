@@ -41,7 +41,7 @@ pub(super) fn pair(inner: Arc<Mutex<RequestStream>>) -> (H3Upgraded, UpgradedSen
     (
         H3Upgraded {
             send_stream: UpgradedSendStreamBridge { tx, error_rx },
-            inner: inner.clone(),
+            inner: Arc::clone(&inner),
             buf: Bytes::new(),
         },
         UpgradedSendStreamTask {
@@ -220,13 +220,13 @@ impl UpgradedSendStreamTask {
                 Poll::Ready(Ok(cursor)) => {
                     this.rx_fut = None;
                     this.send_fut = Some(Box::pin(Self::send_data(
-                        this.inner.clone(),
+                        Arc::clone(&this.inner),
                         Bytes::from_owner(cursor),
                     )));
                 }
                 Poll::Ready(Err(_)) => {
                     this.rx_fut = None;
-                    this.send_fut = Some(Box::pin(Self::finish(this.inner.clone())));
+                    this.send_fut = Some(Box::pin(Self::finish(Arc::clone(&this.inner))));
                 }
                 Poll::Pending => {
                     return Poll::Pending;

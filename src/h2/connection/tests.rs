@@ -614,7 +614,7 @@ fn stream_error_callback_reports_malformed_request() {
     // stream id, while the connection itself stays open.
     let errors: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let errors_clone = errors.clone();
+    let errors_clone = std::sync::Arc::clone(&errors);
     let block = malformed_request_block();
     let script: Vec<u8> = [
         CLIENT_PREFACE,

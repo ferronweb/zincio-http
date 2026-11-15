@@ -435,7 +435,7 @@ impl FrameDecoder {
                 FRAME_CANCEL_PUSH => Frame::CancelPush(take_varint(&payload)?),
                 FRAME_SETTINGS => Frame::Settings(parse_settings(&payload)?),
                 FRAME_PUSH_PROMISE => {
-                    let Some((push_id, id_len)) = parse_varint(&payload)? else {
+                    let Some((push_id, id_len)) = parse_varint(&payload) else {
                         return Err(FrameError::Frame);
                     };
                     Frame::PushPromise {
@@ -600,11 +600,11 @@ fn parse_settings(payload: &[u8]) -> Result<Settings, FrameError> {
     // repeated setting identifier as an error whatever its value").
     let mut grease = Vec::new();
     while !rest.is_empty() {
-        let Some((id, id_len)) = parse_varint(rest)? else {
+        let Some((id, id_len)) = parse_varint(rest) else {
             return Err(FrameError::Frame);
         };
         rest = &rest[id_len..];
-        let Some((value, value_len)) = parse_varint(rest)? else {
+        let Some((value, value_len)) = parse_varint(rest) else {
             return Err(FrameError::Frame);
         };
         rest = &rest[value_len..];
@@ -633,7 +633,7 @@ fn parse_settings(payload: &[u8]) -> Result<Settings, FrameError> {
 /// `H3_FRAME_ERROR` (RFC 9114 Sections 7.1 and 10.8).
 #[inline]
 fn take_varint(buf: &[u8]) -> Result<u64, FrameError> {
-    let Some((value, n)) = parse_varint(buf)? else {
+    let Some((value, n)) = parse_varint(buf) else {
         return Err(FrameError::Frame);
     };
     if n != buf.len() {
@@ -657,13 +657,11 @@ const MIN_VARINT: [u64; 4] = [0, 1 << 6, 1 << 14, 1 << 30];
 /// The control plane uses this to read uni stream type varints before a
 /// stream is assigned its role.
 #[inline]
-pub(crate) fn parse_varint(buf: &[u8]) -> Result<Option<(u64, usize)>, FrameError> {
-    let Some(&first) = buf.first() else {
-        return Ok(None);
-    };
+pub(crate) fn parse_varint(buf: &[u8]) -> Option<(u64, usize)> {
+    let first = *buf.first()?;
     let len = 1usize << (first >> 6);
     if buf.len() < len {
-        return Ok(None);
+        return None;
     }
     let mut value = u64::from(first & 0x3f);
     for &byte in &buf[1..len] {
@@ -671,7 +669,7 @@ pub(crate) fn parse_varint(buf: &[u8]) -> Result<Option<(u64, usize)>, FrameErro
     }
     // Don't do MIN_VARINT check (such overlong encodings are allowed per RFC 9000,
     // except for frame types)
-    Ok(Some((value, len)))
+    Some((value, len))
 }
 
 /// The encoded length of `value` as a QUIC variable-length integer.
@@ -1140,15 +1138,15 @@ mod tests {
             let mut wire = BytesMut::new();
             write_varint(value, &mut wire);
             assert_eq!(wire.len(), varint_size(value));
-            let (got, n) = parse_varint(&wire).unwrap().unwrap();
+            let (got, n) = parse_varint(&wire).unwrap();
             assert_eq!(got, value);
             assert_eq!(n, wire.len());
         }
 
-        assert_eq!(parse_varint(&[0x40, 0x40]), Ok(Some((64, 2))));
+        assert_eq!(parse_varint(&[0x40, 0x40]), Some((64, 2)));
         // Truncated.
-        assert_eq!(parse_varint(&[0x40]), Ok(None));
-        assert_eq!(parse_varint(&[]), Ok(None));
+        assert_eq!(parse_varint(&[0x40]), None);
+        assert_eq!(parse_varint(&[]), None);
     }
 
     #[test]

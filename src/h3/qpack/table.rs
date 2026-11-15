@@ -280,8 +280,7 @@ impl DynamicTable {
         self.size += entry_size;
         self.inserted += 1;
         if self.maintain_maps {
-            self.exact
-                .insert(NameValue(name.clone(), value.clone()), abs);
+            self.exact.insert(NameValue(name.clone(), value), abs);
             self.name.insert(name, abs);
         }
         Ok(())

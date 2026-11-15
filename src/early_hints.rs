@@ -36,7 +36,7 @@ impl EarlyHints {
         let inner = Arc::new(Mutex::new(LazyEarlyHintsState::default()));
         (
             Self {
-                inner: inner.clone(),
+                inner: Arc::clone(&inner),
             },
             EarlyHintsReceiver { inner },
         )

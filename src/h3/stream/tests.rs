@@ -182,7 +182,7 @@ fn full_request_exchange() {
     let mut stream = MockBidi::new(11);
     stream.feed(&wire);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared.clone(), false);
+    let mut request = RequestStream::new(Box::new(stream), Arc::clone(&shared), false);
 
     let mut cx = cx();
     let req = match request.poll_headers(&mut cx) {
@@ -277,7 +277,7 @@ fn control_frames_on_request_stream_are_frame_unexpected() {
         frame.encode(&mut wire);
         let mut stream = MockBidi::new(17);
         stream.feed(&wire);
-        let mut request = RequestStream::new(Box::new(stream), shared.clone(), false);
+        let mut request = RequestStream::new(Box::new(stream), Arc::clone(&shared), false);
         let mut cx = cx();
         let result = request.poll_headers(&mut cx);
         assert!(
@@ -462,7 +462,7 @@ fn headers_blocked_then_unblocked_by_encoder_stream() {
     let mut stream = MockBidi::new(33);
     stream.feed(&wire);
     stream.finish();
-    let mut request = RequestStream::new(Box::new(stream), shared.clone(), false);
+    let mut request = RequestStream::new(Box::new(stream), Arc::clone(&shared), false);
 
     let mut cx = cx();
     // The encoder stream instructions have not arrived yet: the
@@ -506,8 +506,8 @@ fn send_response_encodes_headers_and_queue_encoder_stream() {
     let shared = shared_with_encoder();
     let sink = std::sync::Arc::new(parking_lot::Mutex::new(VecDeque::new()));
     let mut request = RequestStream::new(
-        Box::new(MockBidi::with_sink(41, sink.clone())),
-        shared.clone(),
+        Box::new(MockBidi::with_sink(41, Arc::clone(&sink))),
+        Arc::clone(&shared),
         false,
     );
 
@@ -555,7 +555,7 @@ fn send_data_writes_data_frame() {
 fn send_trailers_after_response() {
     let shared = shared_with_encoder();
     let stream = MockBidi::new(45);
-    let mut request = RequestStream::new(Box::new(stream), shared.clone(), false);
+    let mut request = RequestStream::new(Box::new(stream), Arc::clone(&shared), false);
     let mut cx = cx();
 
     let mut headers = HeaderMap::new();
@@ -792,7 +792,7 @@ fn connect_request_shape() {
     Frame::Headers(section.block).encode(&mut wire);
     let mut stream = MockBidi::new(61);
     stream.feed(&wire);
-    let mut request = RequestStream::new(Box::new(stream), shared.clone(), true);
+    let mut request = RequestStream::new(Box::new(stream), Arc::clone(&shared), true);
     let mut cx2 = cx();
     let req2 = match request.poll_headers(&mut cx2) {
         Poll::Ready(Ok(Some(request))) => request,

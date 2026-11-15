@@ -531,13 +531,13 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     let send_continue_body = is_100_continue.then(|| Arc::new(AtomicBool::new(false)));
     let (request_parts, _) = request.into_parts();
     let (request_body, upgrade) = if request_parts.method == http::Method::CONNECT {
-        (Incoming::Empty, Some(stream.clone()))
+        (Incoming::Empty, Some(Arc::clone(&stream)))
     } else {
         (
             Incoming::Boxed(Box::pin(H3Body::new(
-                stream.clone(),
+                Arc::clone(&stream),
                 send_continue_body.clone(),
-                conn_state.clone(),
+                Arc::clone(&conn_state),
             ))),
             None,
         )
@@ -552,7 +552,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     let upgrade = if let Some(recv_stream) = upgrade {
         let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
         let upgrade = Upgrade::new(upgrade_rx);
-        let upgraded = upgrade.upgraded.clone();
+        let upgraded = Arc::clone(&upgrade.upgraded);
         request.extensions_mut().insert(upgrade);
         Some((upgrade_tx, upgraded, recv_stream))
     } else {
@@ -920,7 +920,7 @@ where
             }
 
             let mut controls = ControlStreams::new(options.local_settings.clone());
-            let shared = controls.shared().clone();
+            let shared = Arc::clone(controls.shared());
             // Request-stream tasks record connection-scoped errors and reset
             // accounting here; the driver closes the connection with the
             // recorded H3 code (a request task cannot itself close the QUIC
@@ -1171,7 +1171,7 @@ where
                                 // (RFC 9114 Section 5.2).
                                 let mut rejected = RequestStream::new(
                                     stream,
-                                    shared.clone(),
+                                    Arc::clone(&shared),
                                     enable_connect_protocol,
                                 );
                                 let _ = rejected.poll_reset(cx, H3_REQUEST_REJECTED);
@@ -1181,19 +1181,19 @@ where
                                 let request_stream =
                                     Arc::new(tokio::sync::Mutex::new(RequestStream::new(
                                         stream,
-                                        shared.clone(),
+                                        Arc::clone(&shared),
                                         enable_connect_protocol,
                                     )));
-                                let request_fn = request_fn.clone();
+                                let request_fn = std::rc::Rc::clone(&request_fn);
                                 let date_cache = date_cache.clone();
-                                let shared = shared.clone();
-                                let conn_state_for_task = conn_state.clone();
+                                let shared = Arc::clone(&shared);
+                                let conn_state_for_task = Arc::clone(&conn_state);
                                 let stream_error_callback = stream_error_callback.clone();
                                 zincio::spawn(async move {
                                     let _end = end_tx;
                                     handle_request(
                                         request_stream,
-                                        shared.clone(),
+                                        shared,
                                         id,
                                         request_fn,
                                         date_cache,

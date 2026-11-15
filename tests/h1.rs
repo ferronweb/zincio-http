@@ -1,4 +1,5 @@
 #![cfg(feature = "h1")]
+#![allow(clippy::unwrap_used)]
 
 use std::time::Duration;
 

@@ -613,7 +613,7 @@ impl ControlStreams {
                 .extend_from_slice(&chunk);
             let (ty, used) = {
                 let pending = self.pending_uni.as_ref().expect("pending uni stream");
-                match frame::parse_varint(&pending.buf).map_err(map_frame_error)? {
+                match frame::parse_varint(&pending.buf) {
                     Some((ty, used)) => (ty, used),
                     None => continue,
                 }

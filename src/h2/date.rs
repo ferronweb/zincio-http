@@ -24,7 +24,7 @@ impl DateCache {
                 != now.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
         }) {
             drop(inner);
-            let value = httpdate::fmt_http_date(now).to_string();
+            let value = httpdate::fmt_http_date(now);
             let mut innerw = self.inner.write().ok()?;
             innerw.replace((value, now));
             drop(innerw);

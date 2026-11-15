@@ -166,7 +166,7 @@ where
             v.1.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
                 != now.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
         }) {
-            let value = httpdate::fmt_http_date(now).to_string();
+            let value = httpdate::fmt_http_date(now);
             self.date_header_value_cached = Some((value, now));
         }
         self.date_header_value_cached
@@ -484,7 +484,7 @@ where
             // Install HTTP upgrade
             let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
             let upgrade = Upgrade::new(upgrade_rx);
-            let upgraded = upgrade.upgraded.clone();
+            let upgraded = std::sync::Arc::clone(&upgrade.upgraded);
             request.extensions_mut().insert(upgrade);
 
             let mut response = {

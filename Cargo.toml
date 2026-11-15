@@ -83,6 +83,13 @@ h3-quinn = ["h3", "dep:quinn"]
 # Expose unstable HTTP/2 and HTTP/3 internals]
 unstable-internals = []
 
+[lints.clippy]
+unwrap_used = { level = "warn" }
+redundant_clone = { level = "warn" }
+clone_on_ref_ptr = { level = "warn" }
+needless_pass_by_value = { level = "warn" }
+unnecessary_wraps = { level = "warn" }
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

@@ -49,7 +49,7 @@ impl MockStream {
     /// been moved into the plane.
     #[inline]
     fn sink(&self) -> std::sync::Arc<parking_lot::Mutex<VecDeque<Option<Bytes>>>> {
-        self.inbound.clone()
+        Arc::clone(&self.inbound)
     }
 
     #[inline]
@@ -150,7 +150,7 @@ impl OpenStreams for MockConn {
         _cx: &mut Context<'_>,
     ) -> Poll<Result<Box<dyn UniStream>, TransportError>> {
         self.opened += 1;
-        Poll::Ready(Ok(Box::new(MockStream::new(self.log.clone()))))
+        Poll::Ready(Ok(Box::new(MockStream::new(Arc::clone(&self.log)))))
     }
 }
 
@@ -270,7 +270,7 @@ fn init_opens_three_streams_and_sends_settings_first() {
 fn peer_settings_then_goaway_events() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     let mut settings = FrameSettings::new();
     settings.insert(SETTINGS_QPACK_MAX_TABLE_CAPACITY, 4096);
     peer.feed(&control_wire(&[
@@ -306,7 +306,7 @@ fn peer_settings_then_goaway_events() {
 fn unknown_frames_on_control_stream_are_skipped() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     let mut wire = BytesMut::from(&[STREAM_TYPE_CONTROL as u8][..]);
     settings_frame(&LocalSettings::default().to_frame()).encode(&mut wire);
     // Unknown frame type 0x42 with payload, between SETTINGS and GOAWAY.
@@ -326,7 +326,7 @@ fn unknown_frames_on_control_stream_are_skipped() {
 fn second_settings_is_frame_unexpected() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     let settings = settings_frame(&LocalSettings::default().to_frame());
     peer.feed(&control_wire(&[settings.clone(), settings]));
     conn.peer_unis.push_back(Box::new(peer));
@@ -340,7 +340,7 @@ fn second_settings_is_frame_unexpected() {
 fn non_settings_first_frame_is_missing_settings() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     peer.feed(&control_wire(&[Frame::Goaway(0)]));
     conn.peer_unis.push_back(Box::new(peer));
 
@@ -360,7 +360,7 @@ fn data_and_push_promise_on_control_stream_are_frame_unexpected() {
     ] {
         let mut plane = ControlStreams::new(LocalSettings::default());
         let mut conn = MockConn::new();
-        let mut peer = MockStream::new(conn.log.clone());
+        let mut peer = MockStream::new(Arc::clone(&conn.log));
         peer.feed(&control_wire(&[
             settings_frame(&LocalSettings::default().to_frame()),
             frame,
@@ -375,7 +375,7 @@ fn data_and_push_promise_on_control_stream_are_frame_unexpected() {
 fn cancel_push_for_never_promised_push_is_id_error() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     peer.feed(&control_wire(&[
         settings_frame(&LocalSettings::default().to_frame()),
         Frame::CancelPush(0),
@@ -391,7 +391,7 @@ fn cancel_push_for_never_promised_push_is_id_error() {
 fn max_push_id_must_not_decrease() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     peer.feed(&control_wire(&[
         settings_frame(&LocalSettings::default().to_frame()),
         Frame::MaxPushId(5),
@@ -408,7 +408,7 @@ fn max_push_id_must_not_decrease() {
     // A reduction is H3_ID_ERROR.
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     peer.feed(&control_wire(&[
         settings_frame(&LocalSettings::default().to_frame()),
         Frame::MaxPushId(5),
@@ -423,7 +423,7 @@ fn max_push_id_must_not_decrease() {
 fn control_stream_fin_after_settings_is_closed_critical_stream() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     // The type byte arrives in its own chunk, as it does on a real
     // stream: classification consumes it, then the frame bytes come
     // through the wired control stream.
@@ -451,11 +451,11 @@ fn control_stream_fin_after_settings_is_closed_critical_stream() {
 fn unknown_uni_stream_type_is_discarded() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut unknown = MockStream::new(conn.log.clone());
+    let mut unknown = MockStream::new(Arc::clone(&conn.log));
     unknown.feed(&[0x42, 0x01, 0x00]);
     unknown.finish();
     conn.peer_unis.push_back(Box::new(unknown));
-    let mut control = MockStream::new(conn.log.clone());
+    let mut control = MockStream::new(Arc::clone(&conn.log));
     control.feed(&control_wire(&[settings_frame(
         &LocalSettings::default().to_frame(),
     )]));
@@ -470,7 +470,7 @@ fn unknown_uni_stream_type_is_discarded() {
 fn push_uni_stream_is_stream_creation_error() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     peer.feed(&[STREAM_TYPE_PUSH as u8, 0x01, 0x00]);
     conn.peer_unis.push_back(Box::new(peer));
 
@@ -484,9 +484,9 @@ fn duplicate_control_stream_is_stream_creation_error() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
     let settings = settings_frame(&LocalSettings::default().to_frame());
-    let mut peer1 = MockStream::new(conn.log.clone());
+    let mut peer1 = MockStream::new(Arc::clone(&conn.log));
     peer1.feed(&control_wire(std::slice::from_ref(&settings)));
-    let mut peer2 = MockStream::new(conn.log.clone());
+    let mut peer2 = MockStream::new(Arc::clone(&conn.log));
     peer2.feed(&control_wire(&[settings]));
     conn.peer_unis.push_back(Box::new(peer1));
     conn.peer_unis.push_back(Box::new(peer2));
@@ -499,7 +499,7 @@ fn duplicate_control_stream_is_stream_creation_error() {
 fn multi_byte_uni_stream_type_is_classified_incrementally() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     let sink = peer.sink();
     peer.feed(&[0x7f]); // first byte of a 2-byte type (0x7f00 = 16128)
     conn.peer_unis.push_back(Box::new(peer));
@@ -526,7 +526,7 @@ fn peer_encoder_stream_feeds_the_qpack_decoder() {
         ..LocalSettings::default()
     });
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     // Type byte + a Set Capacity (0x3f 0x45 = 100) + Insert with
     // Literal Name "foo"="bar" in one chunk: leftover bytes after the
     // type must be fed to the decoder. Capacity 100 is big enough for
@@ -558,7 +558,7 @@ fn peer_encoder_stream_feeds_the_qpack_decoder() {
 fn malformed_encoder_stream_is_qpack_error() {
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     // Duplicate instruction (index 0) on an empty table.
     peer.feed(&[STREAM_TYPE_QPACK_ENCODER as u8, 0x00]);
     conn.peer_unis.push_back(Box::new(peer));
@@ -575,7 +575,7 @@ fn peer_encoder_stream_fin_is_closed_critical_stream() {
         ..LocalSettings::default()
     });
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     peer.feed(&[STREAM_TYPE_QPACK_ENCODER as u8, 0x2a]);
     peer.finish();
     conn.peer_unis.push_back(Box::new(peer));
@@ -590,7 +590,7 @@ fn peer_decoder_stream_zero_insert_count_increment_is_decoder_stream_error() {
     // stream is an Insert Count Increment of 0 -> QPACK_DECODER_STREAM_ERROR.
     let mut plane = ControlStreams::new(LocalSettings::default());
     let mut conn = MockConn::new();
-    let mut peer = MockStream::new(conn.log.clone());
+    let mut peer = MockStream::new(Arc::clone(&conn.log));
     peer.feed(&[STREAM_TYPE_QPACK_DECODER as u8, 0x00]);
     conn.peer_unis.push_back(Box::new(peer));
 

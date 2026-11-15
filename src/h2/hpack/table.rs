@@ -499,8 +499,7 @@ impl Table {
             let name = header.name_bytes().clone();
             let value = header.value_bytes().clone();
             self.entries.push_front(header);
-            self.exact
-                .insert(NameValue(name.clone(), value.clone()), combined);
+            self.exact.insert(NameValue(name.clone(), value), combined);
             self.name.insert(name, combined);
         } else {
             self.entries.push_front(header);

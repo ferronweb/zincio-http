@@ -331,7 +331,7 @@ where
         let upgrade = if let Some(recv_stream) = upgrade {
             let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
             let upgrade = crate::Upgrade::new(upgrade_rx);
-            let upgraded = upgrade.upgraded.clone();
+            let upgraded = Arc::clone(&upgrade.upgraded);
             request.extensions_mut().insert(upgrade);
             Some((upgrade_tx, upgraded, recv_stream))
         } else {
@@ -348,9 +348,9 @@ where
             entry.remote_ended = end_stream;
         }
 
-        let date_cache = self.date_cache.clone();
+        let date_cache = Arc::clone(&self.date_cache);
         let send_date_header = self.opts.send_date_header;
-        let request_fn = request_fn.clone();
+        let request_fn = Arc::clone(request_fn);
         let response_fut = Box::pin(async move {
             let mut response = request_fn(request).await.map_err(e2io)?;
             sanitize_response(&mut response, send_date_header, &date_cache);
@@ -804,7 +804,11 @@ where
                 // The chunk is fully consumed; pop it and, if it carried
                 // END_STREAM and the task is gone, retire the stream.
                 let retire = {
-                    let entry = self.streams.get_mut(&stream_id).unwrap();
+                    // self.streams.get_mut(&stream_id) was done earlier!
+                    let entry = self
+                        .streams
+                        .get_mut(&stream_id)
+                        .expect("invalid HTTP/2 streams state");
                     entry.pending_data.pop_front();
                     if frame_end {
                         entry.local_ended = true;

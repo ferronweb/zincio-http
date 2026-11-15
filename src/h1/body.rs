@@ -97,6 +97,13 @@ where
 
             let _ = body_tx.send(Ok(http_body::Frame::data(chunk))).await;
         }
+        if remaining > 0 {
+            // Some response body length remaining, but there's EOF...
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "unexpected eof before all data was read",
+            ));
+        }
         Ok(())
     }
 

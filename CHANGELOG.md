@@ -5,6 +5,7 @@
 **Not yet released**
 
 - Fixed connections unexpectedly closed due to overly strict encoded integer varint validation (for example when using debug builds of LSQUIC).
+- Fixed HTTP/1.x request bodies being unexpectedly cleanly ended while connection is aborted.
 - Fixed HTTP/2 client being able to break max frame size setting on the server by setting in on the client side on SETTINGS frame.
 - Fixed HTTP/2 custom initial connection window size setting being applied incorrectly.
 - Fixed HTTP/2 idle timeout being applied incorrectly (timeout for any HTTP/2 server activity instead of intended HTTP/2 peer activity)

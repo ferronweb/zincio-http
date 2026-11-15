@@ -38,17 +38,11 @@ pub struct Http2Options {
     /// of the connection. `None` disables the limit.
     pub(crate) max_local_error_reset_streams: Option<usize>,
     /// Maximum number of streams the peer reset before this endpoint
-    /// produced a final response for them (their request was never
-    /// dispatched, or was dispatched but cancelled before the handler
-    /// responded -- CVE-2023-44487 rapid reset). `None`
-    /// disables the limit.
+    /// produced a final response for them . `None` disables the limit.
     pub(crate) max_pending_accept_reset_streams: Option<usize>,
     /// Maximum number of frames that may make up a single, not-yet-finalized
     /// header field block (HEADERS or PUSH_PROMISE without END_HEADERS
-    /// followed by CONTINUATION frames). A peer that keeps a field block
-    /// open across more frames than this is running a CONTINUATION flood
-    /// (CVE-2024-27919 et al.) and the offending stream is reset with
-    /// `RST_STREAM` `PROTOCOL_ERROR`. `None` selects a safe default derived
+    /// followed by CONTINUATION frames). `None` selects a safe default derived
     /// from `max_header_list_size` / `max_frame_size` plus a packing buffer.
     pub(crate) max_continuation_frames: Option<usize>,
 }
@@ -63,11 +57,6 @@ impl Default for Http2Options {
             send_date_header: true,
             max_concurrent_streams: 200,
             initial_stream_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
-            // RFC 9113 Section 6.9.1: the connection send window starts
-            // at 65535; the peer raises it with WINDOW_UPDATE. Do not
-            // raise this without also sending a WINDOW_UPDATE that
-            // advertises the larger receive window, or the peer will
-            // treat our sends as a flow-control violation.
             initial_connection_window_size: DEFAULT_CONNECTION_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE as u32,
             max_header_list_size: 1024 * 16,
@@ -179,10 +168,13 @@ impl Http2Options {
 
     /// Sets the maximum number of RST_STREAM frames this endpoint sends in
     /// response to protocol errors made by the peer across the lifetime of
-    /// the connection. When the peer keeps producing protocol errors past
-    /// this many local resets, the connection is closed with a GOAWAY of
-    /// type `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2). `None` disables
-    /// the limit. Defaults to `Some(1024)`.
+    /// the connection.
+    ///
+    /// When the peer keeps producing protocol errors past this many local
+    /// resets, the connection is closed with a GOAWAY of type
+    /// `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
+    ///
+    /// `None` disables the limit. Defaults to `Some(1024)`.
     #[inline]
     pub fn max_local_error_reset_streams(mut self, max: Option<usize>) -> Self {
         self.max_local_error_reset_streams = max;
@@ -190,13 +182,16 @@ impl Http2Options {
     }
 
     /// Sets the maximum number of streams the peer reset before this endpoint
-    /// produced a final response for them (their request was never
-    /// dispatched, or was dispatched but cancelled before the handler
-    /// responded) that may be counted at a time. When the peer keeps
-    /// opening and resetting streams faster than they are responded to,
-    /// the connection is closed with a GOAWAY
-    /// of type `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2). `None` disables
-    /// the limit. Defaults to `Some(20)`.
+    /// produced a final response for them that may be counted at a time.
+    ///
+    /// When the peer keeps opening and resetting streams faster than they are
+    /// responded to, the connection is closed with a GOAWAY of type
+    /// `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
+    ///
+    /// The budget refills at 50 streams a second, so cancelled requests
+    /// spread over a connection's life never use it up.
+    ///
+    /// `None` disables the limit. Defaults to `Some(20)`.
     #[inline]
     pub fn max_pending_accept_reset_streams(mut self, max: Option<usize>) -> Self {
         self.max_pending_accept_reset_streams = max;
@@ -204,8 +199,9 @@ impl Http2Options {
     }
 
     /// Sets the maximum number of frames that may compose a single header
-    /// field block that has not yet been terminated by END_HEADERS. A field
-    /// block is opened by a HEADERS (or PUSH_PROMISE) frame without
+    /// field block that has not yet been terminated by END_HEADERS.
+    ///
+    /// A field block is opened by a HEADERS (or PUSH_PROMISE) frame without
     /// END_HEADERS and continued by CONTINUATION frames. When a peer keeps
     /// one open past this many frames, it is a CONTINUATION flood and the
     /// stream is reset with `RST_STREAM` `PROTOCOL_ERROR`.
@@ -213,7 +209,7 @@ impl Http2Options {
     /// `None` (the default) computes a safe bound automatically: the
     /// configured `max_header_list_size` divided by `max_frame_size`,
     /// plus a ~20% packing buffer and a fixed slack of 10 frames. This is
-    /// enough for any honestly-packed header block while catching floods
+    /// enough for any correctly-packed header block while catching floods
     /// that never close the block.
     ///
     /// Defaults to `None`.

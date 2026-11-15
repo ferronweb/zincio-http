@@ -170,9 +170,12 @@ impl Http3Options {
 
     /// Sets the maximum number of RESET_STREAM frames this endpoint sends
     /// in response to protocol errors made by the peer across the lifetime
-    /// of the connection (RFC 9114 Section 10.5): a peer that keeps
-    /// sending malformed requests past this limit costs the connection
-    /// rather than the stream, which is then closed with `H3_EXCESSIVE_LOAD`.
+    /// of the connection (RFC 9114 Section 10.5).
+    ///
+    /// A peer that keeps sending malformed requests past this limit costs
+    /// the connection rather than the stream, which is then closed with
+    /// `H3_EXCESSIVE_LOAD`.
+    ///
     /// `None` disables the limit. Defaults to `Some(1024)`.
     #[inline]
     pub fn max_local_error_reset_streams(mut self, max: Option<usize>) -> Self {
@@ -182,11 +185,14 @@ impl Http3Options {
 
     /// Sets how many streams the peer may open and then terminate
     /// (RESET_STREAM or STOP_SENDING) before this endpoint accepts them
-    /// (RFC 9114 Section 10.5). The budget refills at 50 streams a second,
-    /// so cancelled requests spread over a connection's life never use it
-    /// up; a peer that churns through streams faster exceeds it, and the
-    /// connection is closed with `H3_EXCESSIVE_LOAD`. `None` disables the
-    /// limit. Defaults to `Some(20)`.
+    /// (RFC 9114 Section 10.5).
+    ///
+    /// The budget refills at 50 streams a second, so cancelled requests
+    /// spread over a connection's life never use it up. A peer that churns
+    /// through streams faster exceeds it, and the connection is closed
+    /// with `H3_EXCESSIVE_LOAD`.
+    ///
+    /// `None` disables the limit. Defaults to `Some(20)`.
     #[inline]
     pub fn max_pending_accept_reset_streams(mut self, max: Option<usize>) -> Self {
         self.max_pending_accept_reset_streams = max;

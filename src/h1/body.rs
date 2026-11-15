@@ -167,6 +167,14 @@ where
                     let len = usize::from_str_radix(numbers, 16).map_err(|_| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid chunk length")
                     })?;
+                    if len > 4096 {
+                        // Similar limit to net/http in Go
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid chunk length",
+                        ));
+                    }
+
                     // Ignore the trailing CRLF
                     self.read_buf.advance(begin_search + pos + 2);
                     break len;

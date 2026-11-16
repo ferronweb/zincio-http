@@ -504,7 +504,12 @@ async fn test_header_size_limit_exceeded() {
 
         let mut response_buf = Vec::new();
         client_reader.read_to_end(&mut response_buf).await.unwrap();
-        assert!(response_buf.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
+        // RFC 6585 5: a head over the limit is 431, as one with too many fields.
+        assert!(
+            response_buf.starts_with(b"HTTP/1.1 431 Request Header Fields Too Large\r\n"),
+            "{}",
+            String::from_utf8_lossy(&response_buf)
+        );
         assert!(server_task.await.unwrap().is_err());
     })
     .await;

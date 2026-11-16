@@ -13,6 +13,27 @@ enum ServicePoll<ResB> {
     Upgrade(super::super::upgrade::UpgradedSendStreamTask),
 }
 
+/// Starts sending `msg` and parks the send future in `slot` until the
+/// connection drains the channel.
+#[inline]
+fn start_send(
+    msg_tx: &kanal::AsyncSender<StreamMsg>,
+    mut slot: Pin<&mut Option<kanal::SendFuture<'static, StreamMsg>>>,
+    msg: StreamMsg,
+) {
+    let send = msg_tx.send(msg);
+    // SAFETY: the future only borrows `msg_tx`, which outlives the slot
+    // (both are fields of the same pinned driver).
+    let send = unsafe {
+        std::mem::transmute::<kanal::SendFuture<'_, StreamMsg>, kanal::SendFuture<'static, StreamMsg>>(
+            send,
+        )
+    };
+    // SAFETY: the slot is empty. A parked future is only taken once it
+    // has completed, so no pinned value is moved.
+    unsafe { *slot.as_mut().get_unchecked_mut() = Some(send) };
+}
+
 pin_project! {
     /// Drives one stream task: runs the user's `request_fn`, forwards
     /// interim and final responses to the connection, and pipes the
@@ -156,17 +177,7 @@ where
             // driven again once the queue is empty, so a completed
             // response or body frame is never re-read.
             if let Some(msg) = this.queue.pop_front() {
-                let msg_tx_fut = this.msg_tx.send(msg);
-                // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
-                let msg_tx_fut = unsafe {
-                    std::mem::transmute::<
-                        kanal::SendFuture<'_, StreamMsg>,
-                        kanal::SendFuture<'static, StreamMsg>,
-                    >(msg_tx_fut)
-                };
-                // SAFETY: Pin is re-borrowed here
-                let uckm = unsafe { this.msg_tx_fut.as_mut().get_unchecked_mut() };
-                *uckm = Some(msg_tx_fut);
+                start_send(this.msg_tx, this.msg_tx_fut.as_mut(), msg);
                 continue;
             }
             if *this.done {
@@ -469,17 +480,7 @@ where
             }
         }
 
-        let msg_tx_fut2 = msg_tx.send(msg);
-        // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
-        let msg_tx_fut2 = unsafe {
-            std::mem::transmute::<
-                kanal::SendFuture<'_, StreamMsg>,
-                kanal::SendFuture<'static, StreamMsg>,
-            >(msg_tx_fut2)
-        };
-        // SAFETY: Pin is re-borrowed here
-        let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
-        *uckm = Some(msg_tx_fut2);
+        start_send(msg_tx, msg_tx_fut.as_mut(), msg);
 
         if let Some(msg_tx_fut2) = msg_tx_fut.as_mut().as_pin_mut() {
             match msg_tx_fut2.poll(cx) {
@@ -567,18 +568,7 @@ where
                             parts: headers,
                             end_stream: false,
                         };
-
-                        let msg_tx_fut2 = msg_tx.send(msg);
-                        // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
-                        let msg_tx_fut2 = unsafe {
-                            std::mem::transmute::<
-                                kanal::SendFuture<'_, StreamMsg>,
-                                kanal::SendFuture<'static, StreamMsg>,
-                            >(msg_tx_fut2)
-                        };
-                        // SAFETY: Pin is re-borrowed here
-                        let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
-                        *uckm = Some(msg_tx_fut2);
+                        start_send(msg_tx, msg_tx_fut.as_mut(), msg);
 
                         continue;
                     }
@@ -593,32 +583,15 @@ where
                             }
 
                             let msg = StreamMsg::Data { data, end_stream };
-
-                            let msg_tx_fut2 = msg_tx.send(msg);
-                            // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
-                            let msg_tx_fut2 = unsafe {
-                                std::mem::transmute::<
-                                    kanal::SendFuture<'_, StreamMsg>,
-                                    kanal::SendFuture<'static, StreamMsg>,
-                                >(msg_tx_fut2)
-                            };
-                            // SAFETY: Pin is re-borrowed here
-                            let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
-                            *uckm = Some(msg_tx_fut2);
+                            start_send(msg_tx, msg_tx_fut.as_mut(), msg);
                         }
                         Err(frame) => match frame.into_trailers() {
                             Ok(trailers) => {
-                                let msg_tx_fut2 = msg_tx.send(StreamMsg::Trailers { trailers });
-                                // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
-                                let msg_tx_fut2 = unsafe {
-                                    std::mem::transmute::<
-                                        kanal::SendFuture<'_, StreamMsg>,
-                                        kanal::SendFuture<'static, StreamMsg>,
-                                    >(msg_tx_fut2)
-                                };
-                                // SAFETY: Pin is re-borrowed here
-                                let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
-                                *uckm = Some(msg_tx_fut2);
+                                start_send(
+                                    msg_tx,
+                                    msg_tx_fut.as_mut(),
+                                    StreamMsg::Trailers { trailers },
+                                );
                                 *end = true;
                             }
                             Err(_) => return Poll::Ready(()),
@@ -629,17 +602,7 @@ where
                     let msg = StreamMsg::Reset {
                         error_code: crate::h2::error::Reason::InternalError.code(),
                     };
-                    let msg_tx_fut2 = msg_tx.send(msg);
-                    // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
-                    let msg_tx_fut2 = unsafe {
-                        std::mem::transmute::<
-                            kanal::SendFuture<'_, StreamMsg>,
-                            kanal::SendFuture<'static, StreamMsg>,
-                        >(msg_tx_fut2)
-                    };
-                    // SAFETY: Pin is re-borrowed here
-                    let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
-                    *uckm = Some(msg_tx_fut2);
+                    start_send(msg_tx, msg_tx_fut.as_mut(), msg);
                     *end = true;
                 }
                 Poll::Ready(None) => {
@@ -648,18 +611,7 @@ where
                             parts: headers,
                             end_stream: true,
                         };
-
-                        let msg_tx_fut2 = msg_tx.send(msg);
-                        // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
-                        let msg_tx_fut2 = unsafe {
-                            std::mem::transmute::<
-                                kanal::SendFuture<'_, StreamMsg>,
-                                kanal::SendFuture<'static, StreamMsg>,
-                            >(msg_tx_fut2)
-                        };
-                        // SAFETY: Pin is re-borrowed here
-                        let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
-                        *uckm = Some(msg_tx_fut2);
+                        start_send(msg_tx, msg_tx_fut.as_mut(), msg);
                         *end = true;
 
                         continue;
@@ -671,17 +623,7 @@ where
                         data: Bytes::new(),
                         end_stream: true,
                     };
-                    let msg_tx_fut2 = msg_tx.send(msg);
-                    // SAFETY: msg_tx_fut lives as long as msg_tx after storing in struct
-                    let msg_tx_fut2 = unsafe {
-                        std::mem::transmute::<
-                            kanal::SendFuture<'_, StreamMsg>,
-                            kanal::SendFuture<'static, StreamMsg>,
-                        >(msg_tx_fut2)
-                    };
-                    // SAFETY: Pin is re-borrowed here
-                    let uckm = unsafe { msg_tx_fut.as_mut().get_unchecked_mut() };
-                    *uckm = Some(msg_tx_fut2);
+                    start_send(msg_tx, msg_tx_fut.as_mut(), msg);
                     *end = true;
                 }
                 Poll::Pending => {

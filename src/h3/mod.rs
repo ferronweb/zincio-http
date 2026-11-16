@@ -64,6 +64,7 @@ use crate::{
         date::DateCache,
         stream::{RequestStream, SharedCodecs, StreamError},
     },
+    response::sanitize_response_headers,
     EarlyHints, HttpProtocol, Incoming, StreamErrorCallback, Upgrade, Upgraded,
 };
 
@@ -141,14 +142,6 @@ impl ConnResetState {
 /// The shared handle on a request stream: the connection task, the request
 /// task, the response body, and a possible upgrade all work through it.
 type SharedRequest = Arc<tokio::sync::Mutex<RequestStream>>;
-
-static HTTP3_INVALID_HEADERS: [http::header::HeaderName; 5] = [
-    http::header::HeaderName::from_static("keep-alive"),
-    http::header::HeaderName::from_static("proxy-connection"),
-    http::header::CONNECTION,
-    http::header::TRANSFER_ENCODING,
-    http::header::UPGRADE,
-];
 
 /// The read half of a shared request stream, as a [`Body`].
 pub(crate) struct H3Body {
@@ -333,19 +326,6 @@ fn h3_connection_error(code: u64, detail: Option<&str>) -> std::io::Error {
 #[inline]
 fn h3_stream_error(stream_id: u64, error: &impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("HTTP/3 stream {stream_id} error: {error}"))
-}
-
-#[inline]
-fn remove_invalid_http3_headers(headers: &mut http::HeaderMap) {
-    for header in &HTTP3_INVALID_HEADERS {
-        headers.remove(header);
-    }
-    if headers
-        .get(http::header::TE)
-        .is_some_and(|v| v != "trailers")
-    {
-        headers.remove(http::header::TE);
-    }
 }
 
 /// Waits until the peer's SETTINGS bound the QPACK encoder, so field
@@ -675,7 +655,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                     .or_insert(http_date);
             }
         }
-        remove_invalid_http3_headers(response_headers);
+        sanitize_response_headers(response_headers);
     }
 
     let response_is_end_stream = response.body().is_end_stream();
@@ -763,7 +743,7 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                     } else if frame.is_trailers() {
                         match frame.into_trailers() {
                             Ok(mut trailers) => {
-                                remove_invalid_http3_headers(&mut trailers);
+                                sanitize_response_headers(&mut trailers);
                                 if let Err(error) = send_trailers(&stream, &trailers).await {
                                     report(&stream_error_callback, stream_id, &error);
                                     abort(&stream).await;

@@ -116,7 +116,6 @@ where
         version: Version,
     ) -> Result<bytes::Bytes, std::io::Error> {
         let len = {
-            // Safety: u8 is a primitive type, so we can safely assume initialization
             let mut len_buf_pos: usize = 0;
             let mut just_started = true;
             loop {
@@ -181,7 +180,6 @@ where
                 }
             }
         };
-        // Safety: u8 is a primitive type, so we can safely assume initialization
         let mut read = 0;
         if len == 0 && would_have_trailers {
             return Ok(bytes::Bytes::new()); // Empty terminating chunk
@@ -231,7 +229,6 @@ where
 
     #[inline]
     pub(crate) async fn read_trailers(&mut self) -> Result<Option<HeaderMap>, std::io::Error> {
-        // Safety: u8 is a primitive type, so we can safely assume initialization
         let mut bytes_read: usize = 0;
         let mut just_started = true;
         while bytes_read < self.options.max_header_size {

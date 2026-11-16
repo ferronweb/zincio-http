@@ -3,6 +3,7 @@ use http_body::Body;
 use tokio_util::sync::CancellationToken;
 
 use crate::h2::date::DateCache;
+use crate::response::sanitize_response_headers;
 use crate::{HttpProtocol, Incoming, StreamErrorCallback};
 
 mod date;
@@ -43,17 +44,6 @@ pub use options::Http2Options;
 
 pub(crate) use stream::H2Body;
 
-/// Header fields a server must strip from a response before sending it
-/// on an HTTP/2 connection (RFC 9113 Section 8.1.2.2): these are
-/// connection-level concerns, not per-message headers.
-pub(crate) const HTTP2_INVALID_HEADERS: [http::header::HeaderName; 5] = [
-    http::header::HeaderName::from_static("keep-alive"),
-    http::header::HeaderName::from_static("proxy-connection"),
-    http::header::CONNECTION,
-    http::header::TRANSFER_ENCODING,
-    http::header::UPGRADE,
-];
-
 /// Mangles a response into HTTP/2-legal shape: injects a `Date` header
 /// when configured and removes connection-specific response headers.
 #[inline]
@@ -72,17 +62,7 @@ pub(super) fn sanitize_response<ResB>(
                 .or_insert(http_date);
         }
     }
-    for header in &HTTP2_INVALID_HEADERS {
-        if let http::header::Entry::Occupied(entry) = response_headers.entry(header) {
-            entry.remove();
-        }
-    }
-    if response_headers
-        .get(http::header::TE)
-        .is_some_and(|v| v != "trailers")
-    {
-        response_headers.remove(http::header::TE);
-    }
+    sanitize_response_headers(response_headers);
 }
 
 /// An HTTP/2 connection handler.

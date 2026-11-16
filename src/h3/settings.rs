@@ -10,7 +10,6 @@
 //! Validation of the SETTINGS *frame* (reserved identifiers, duplicates)
 //! is the frame codec's job; this module only extracts values and tracks
 //! which identifiers the peer sent.
-#![allow(dead_code)]
 
 use crate::h3::frame::{
     Settings as FrameSettings, SETTINGS_ENABLE_CONNECT_PROTOCOL, SETTINGS_MAX_FIELD_SECTION_SIZE,
@@ -53,7 +52,9 @@ impl PeerSettings {
         self.qpack_blocked_streams
     }
 
-    /// The peer's `SETTINGS_ENABLE_CONNECT_PROTOCOL`.
+    /// The peer's `SETTINGS_ENABLE_CONNECT_PROTOCOL`. A server does not
+    /// consume this value, so it exists for tests and diagnostics only.
+    #[cfg(test)]
     #[inline]
     pub fn enable_connect_protocol(&self) -> bool {
         self.enable_connect_protocol

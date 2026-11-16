@@ -609,7 +609,6 @@ where
                     self.peer.max_frame_size = setting.value as usize;
                     self.writer.max_frame_size = setting.value as usize;
                 }
-                0x06 => self.peer.max_header_list_size = setting.value,
                 _ => {}
             }
         }
@@ -740,97 +739,14 @@ where
     /// window is exhausted or the queue is empty.
     #[inline]
     pub(crate) fn pump_stream_data(&mut self, stream_id: u32) {
-        loop {
-            // Decide how much (if any) of the front chunk to send.
-            let (amount, limited) = match self.streams.get_mut(&stream_id) {
-                None => return,
-                Some(entry) => {
-                    if entry.local_ended {
-                        return;
-                    }
-                    let Some((data, end_stream)) = entry.pending_data.front() else {
-                        return;
-                    };
-                    if data.is_empty() {
-                        // Zero-length frames are not flow controlled.
-                        let end = *end_stream;
-                        self.writer.write_data(&mut self.out, stream_id, end, data);
-                        let retire = {
-                            let entry = self
-                                .streams
-                                .get_mut(&stream_id)
-                                .expect("stream entry exists: lookup succeeded before pump");
-                            entry.pending_data.pop_front();
-                            if end {
-                                entry.local_ended = true;
-                                entry.task_done
-                            } else {
-                                false
-                            }
-                        };
-                        if retire {
-                            self.mark_closed(stream_id);
-                            self.streams.remove(&stream_id);
-                            return;
-                        }
-                        continue;
-                    }
-                    let available = self.conn_window.min(entry.send_window);
-                    if available <= 0 {
-                        return;
-                    }
-                    let orig_amount = (data.len() as u64).min(available as u64);
-                    let amount = orig_amount.min(self.peer.max_frame_size as u64);
-                    (amount as usize, orig_amount != amount)
-                }
-            };
-            // Send `amount` bytes from the front chunk; the entry borrow
-            // ends before we may remove the stream below.
-            let (frame_end, all, chunk) = {
-                let entry = self
-                    .streams
-                    .get_mut(&stream_id)
-                    .expect("stream entry exists: lookup succeeded before pump");
-                let (data, end_stream) = entry
-                    .pending_data
-                    .front_mut()
-                    .expect("pending chunk exists: front checked before pump");
-                let all = amount == data.len();
-                let frame_end = *end_stream && all;
-                let chunk = data.split_to(amount);
-                entry.send_window -= amount as i64;
-                (frame_end, all, chunk)
-            };
-            self.writer
-                .write_data(&mut self.out, stream_id, frame_end, &chunk);
-            self.conn_window -= amount as i64;
-            if all {
-                // The chunk is fully consumed; pop it and, if it carried
-                // END_STREAM and the task is gone, retire the stream.
-                let retire = {
-                    // self.streams.get_mut(&stream_id) was done earlier!
-                    let entry = self
-                        .streams
-                        .get_mut(&stream_id)
-                        .expect("invalid HTTP/2 streams state");
-                    entry.pending_data.pop_front();
-                    if frame_end {
-                        entry.local_ended = true;
-                        entry.task_done
-                    } else {
-                        false
-                    }
-                };
-                if retire {
-                    self.mark_closed(stream_id);
-                    self.streams.remove(&stream_id);
-                    return;
-                }
-            } else if !limited {
-                // The tail waits for the window to open again.
-                break;
-            }
-        }
+        self.pump_stream_data_inner(stream_id, false);
+    }
+
+    /// Like [`Self::pump_stream_data`], but capped by the stream's DRR
+    /// deficit and sends at most one frame per call.
+    #[inline]
+    fn pump_stream_data_drr(&mut self, stream_id: u32) {
+        self.pump_stream_data_inner(stream_id, true);
     }
 
     /// Attempts to drain every stream's queued DATA after the flow
@@ -892,11 +808,10 @@ where
         self.drain_ids = ids;
     }
 
-    /// Like `pump_stream_data` but capped by `deficit` and sends at most
-    /// one frame (quantum) per call for DRR fairness.
     #[inline]
-    fn pump_stream_data_drr(&mut self, stream_id: u32) {
+    fn pump_stream_data_inner(&mut self, stream_id: u32, drr: bool) {
         loop {
+            // Decide how much (if any) of the front chunk to send.
             let (amount, limited) = match self.streams.get_mut(&stream_id) {
                 None => return,
                 Some(entry) => {
@@ -907,13 +822,14 @@ where
                         return;
                     };
                     if data.is_empty() {
+                        // Zero-length frames are not flow controlled.
                         let end = *end_stream;
                         self.writer.write_data(&mut self.out, stream_id, end, data);
                         let retire = {
                             let entry = self
                                 .streams
                                 .get_mut(&stream_id)
-                                .expect("stream entry exists");
+                                .expect("stream entry exists: lookup succeeded before pump");
                             entry.pending_data.pop_front();
                             if end {
                                 entry.local_ended = true;
@@ -929,50 +845,57 @@ where
                         }
                         continue;
                     }
-                    if entry.deficit == 0 {
-                        return;
-                    }
                     let available = self.conn_window.min(entry.send_window);
                     if available <= 0 {
                         return;
                     }
+                    if drr && entry.deficit == 0 {
+                        return;
+                    }
                     let orig_amount = (data.len() as u64).min(available as u64);
-                    let capped = orig_amount.min(entry.deficit as u64);
-                    let amount = capped.min(self.peer.max_frame_size as u64);
+                    let cap = if drr {
+                        orig_amount.min(entry.deficit as u64)
+                    } else {
+                        orig_amount
+                    };
+                    let amount = cap.min(self.peer.max_frame_size as u64);
                     if amount == 0 {
                         return;
                     }
-                    (
-                        amount as usize,
-                        orig_amount != amount || capped != orig_amount,
-                    )
+                    (amount as usize, orig_amount != amount)
                 }
             };
+            // Send `amount` bytes from the front chunk; the entry borrow
+            // ends before we may remove the stream below.
             let (frame_end, all, chunk) = {
                 let entry = self
                     .streams
                     .get_mut(&stream_id)
-                    .expect("stream entry exists");
+                    .expect("stream entry exists: lookup succeeded before pump");
                 let (data, end_stream) = entry
                     .pending_data
                     .front_mut()
-                    .expect("pending chunk exists");
+                    .expect("pending chunk exists: front checked before pump");
                 let all = amount == data.len();
                 let frame_end = *end_stream && all;
                 let chunk = data.split_to(amount);
                 entry.send_window -= amount as i64;
-                entry.deficit -= amount;
+                if drr {
+                    entry.deficit -= amount;
+                }
                 (frame_end, all, chunk)
             };
             self.writer
                 .write_data(&mut self.out, stream_id, frame_end, &chunk);
             self.conn_window -= amount as i64;
             if all {
+                // The chunk is fully consumed; pop it and, if it carried
+                // END_STREAM and the task is gone, retire the stream.
                 let retire = {
                     let entry = self
                         .streams
                         .get_mut(&stream_id)
-                        .expect("stream entry exists");
+                        .expect("invalid HTTP/2 streams state");
                     entry.pending_data.pop_front();
                     if frame_end {
                         entry.local_ended = true;
@@ -987,10 +910,13 @@ where
                     return;
                 }
             } else if !limited {
+                // The tail waits for the window to open again.
                 break;
             }
-            // DRR: one frame per quantum.
-            break;
+            if drr {
+                // DRR: one frame per quantum.
+                break;
+            }
         }
     }
 
@@ -1214,10 +1140,7 @@ where
         ));
         for (name, value) in headers.iter() {
             let name_bytes = name.as_str().as_bytes();
-            if crate::h2::stream::is_connection_specific(name_bytes) {
-                continue;
-            }
-            if name == http::header::TE && !crate::h2::stream::te_is_trailers(value.as_bytes()) {
+            if crate::request::is_invalid_field(name_bytes, value.as_bytes()) {
                 continue;
             }
             fields.push(HpackHeader::new(

@@ -29,11 +29,7 @@ where
         if self.options.send_date_header {
             let headers = response.headers_mut();
             if !headers.contains_key(header::DATE) {
-                headers.insert(
-                    header::DATE,
-                    HeaderValue::from_str(self.get_date_header_value())
-                        .map_err(|e| std::io::Error::other(e.to_string()))?,
-                );
+                headers.insert(header::DATE, self.get_date_header_value());
             }
         }
 

@@ -39,6 +39,7 @@ use pin_project_lite::pin_project;
 
 use super::hpack::Header;
 use crate::early_hints::EarlyHintsReceiver;
+use crate::request::{field_name, is_invalid_field, parse_content_length};
 use crate::Protocol;
 
 /// Messages the connection task sends to a stream task: request body
@@ -318,22 +319,6 @@ pub(crate) struct ParsedRequest {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MalformedRequest;
 
-/// Header names a request must not carry (RFC 9113 Section 8.1.2.2).
-const CONNECTION_SPECIFIC: &[&[u8]] = &[
-    b"connection",
-    b"keep-alive",
-    b"proxy-connection",
-    b"transfer-encoding",
-    b"upgrade",
-];
-
-#[inline]
-pub(crate) fn is_connection_specific(name: &[u8]) -> bool {
-    CONNECTION_SPECIFIC
-        .iter()
-        .any(|forbidden| **forbidden == *name)
-}
-
 /// Validates a decoded request field block and builds an
 /// `http::Request`-ready representation.
 ///
@@ -405,14 +390,11 @@ pub(crate) fn parse_request(
             }
         } else {
             pseudo_phase = false;
-            if is_connection_specific(name) {
-                return Err(MalformedRequest);
-            }
-            if name == b"te" && !te_is_trailers(value) {
+            if is_invalid_field(name, value) {
                 return Err(MalformedRequest);
             }
             if name == b"content-length" {
-                let value = parse_content_length(value)?;
+                let value = parse_content_length(value).ok_or(MalformedRequest)?;
                 if let Some(previous) = content_length {
                     if previous != value {
                         content_length_conflict = true;
@@ -421,12 +403,7 @@ pub(crate) fn parse_request(
                     content_length = Some(value);
                 }
             }
-            if name.iter().any(|byte| byte.is_ascii_uppercase()) {
-                // Field names must be lowercase (Section 8.1.2.1);
-                // `HeaderName::from_bytes` would quietly normalize.
-                return Err(MalformedRequest);
-            }
-            let name = http::header::HeaderName::from_bytes(name).map_err(|_| MalformedRequest)?;
+            let name = field_name(name).ok_or(MalformedRequest)?;
             let value = http::header::HeaderValue::from_maybe_shared(value.clone())
                 .map_err(|_| MalformedRequest)?;
             regular.append(name, value);
@@ -516,46 +493,7 @@ pub(crate) fn parse_request(
     })
 }
 
-/// The TE field is only legal with the single value "trailers"
-/// (RFC 9113 Section 8.1.2.2).
-#[inline]
-pub(crate) fn te_is_trailers(value: &[u8]) -> bool {
-    std::str::from_utf8(value)
-        .ok()
-        .is_some_and(|value| value.split(',').all(|part| part.trim() == "trailers"))
-}
-
-/// Parses a content-length header value into a `u64`; anything but
-/// bare digits (optionally framed by OWS) is malformed.
-#[inline]
-pub(crate) fn parse_content_length(value: &[u8]) -> Result<u64, MalformedRequest> {
-    let start = match value
-        .iter()
-        .position(|byte| *byte != b' ' && *byte != b'\t')
-    {
-        // Empty or all-whitespace.
-        None => return Err(MalformedRequest),
-        Some(start) => start,
-    };
-    let end = value
-        .iter()
-        .rposition(|byte| *byte != b' ' && *byte != b'\t')
-        .unwrap_or(start);
-    let value = &value[start..=end];
-    if value.is_empty() || value.iter().any(|byte| !byte.is_ascii_digit()) {
-        return Err(MalformedRequest);
-    }
-    let mut result: u64 = 0;
-    for &byte in value {
-        result = result
-            .checked_mul(10)
-            .and_then(|n| n.checked_add((byte - b'0') as u64))
-            .ok_or(MalformedRequest)?;
-    }
-    Ok(result)
-}
-
-/// Validates a trailer field block (RFC 9113 Section 8.1.2.1):
+/// Parses a trailer field block (RFC 9113 Section 8.1.2.1):
 /// pseudo-header fields are not allowed in trailers.
 #[inline]
 pub(crate) fn parse_trailers(headers: &[Header]) -> Result<HeaderMap, MalformedRequest> {
@@ -565,10 +503,7 @@ pub(crate) fn parse_trailers(headers: &[Header]) -> Result<HeaderMap, MalformedR
         if name.first() == Some(&b':') {
             return Err(MalformedRequest);
         }
-        if name.iter().any(|byte| byte.is_ascii_uppercase()) {
-            return Err(MalformedRequest);
-        }
-        let name = http::header::HeaderName::from_bytes(name).map_err(|_| MalformedRequest)?;
+        let name = field_name(name).ok_or(MalformedRequest)?;
         let value = http::header::HeaderValue::from_maybe_shared(header.value_bytes().clone())
             .map_err(|_| MalformedRequest)?;
         trailers.append(name, value);

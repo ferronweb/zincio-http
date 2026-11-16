@@ -13,7 +13,7 @@ pub(crate) type RawHandle = std::os::fd::RawFd;
 #[cfg(windows)]
 pub(crate) type RawHandle = std::os::windows::io::RawHandle;
 
-use std::{mem::MaybeUninit, time::UNIX_EPOCH};
+use std::mem::MaybeUninit;
 
 use bytes::{Buf, Bytes, BytesMut};
 use http::{header, HeaderMap, HeaderValue, Request, Response, Version};
@@ -64,7 +64,7 @@ pub struct Http1<Io> {
     options: options::Http1Options,
     cancel_token: Option<CancellationToken>,
     parsed_headers: Box<[MaybeUninit<httparse::Header<'static>>]>,
-    date_header_value_cached: Option<(String, std::time::SystemTime)>,
+    date_header_value_cached: Option<(HeaderValue, std::time::SystemTime)>,
     cached_headers: Option<HeaderMap>,
     read_buf: BytesMut,
     response_head_buf: Vec<u8>,
@@ -141,7 +141,6 @@ where
     /// ```
     #[inline]
     pub fn new(io: Io, options: options::Http1Options) -> Self {
-        // Safety: u8 is a primitive type, so we can safely assume initialization
         let read_buf = BytesMut::with_capacity(options.max_header_size);
         let parsed_headers: Box<[MaybeUninit<httparse::Header<'static>>]> =
             Box::new_uninit_slice(options.max_header_count);
@@ -160,19 +159,12 @@ where
     }
 
     #[inline]
-    fn get_date_header_value(&mut self) -> &str {
-        let now = std::time::SystemTime::now();
-        if self.date_header_value_cached.as_ref().is_none_or(|v| {
-            v.1.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
-                != now.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
-        }) {
-            let value = httpdate::fmt_http_date(now);
-            self.date_header_value_cached = Some((value, now));
-        }
-        self.date_header_value_cached
-            .as_ref()
-            .map(|v| v.0.as_str())
-            .unwrap_or("")
+    fn get_date_header_value(&mut self) -> HeaderValue {
+        crate::date::cached_date_at(
+            &mut self.date_header_value_cached,
+            std::time::SystemTime::now(),
+        )
+        .unwrap_or_else(|| HeaderValue::from_static(""))
     }
 
     /// Attaches a [`CancellationToken`] for graceful shutdown.

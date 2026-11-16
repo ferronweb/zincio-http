@@ -208,16 +208,16 @@ fn trailers_reject_pseudo_headers() {
 
 #[test]
 fn content_length_parser() {
-    assert_eq!(parse_content_length(b"42"), Ok(42));
-    assert_eq!(parse_content_length(b" 42 "), Ok(42));
-    assert!(parse_content_length(b"").is_err());
-    assert!(parse_content_length(b"-1").is_err());
+    assert_eq!(parse_content_length(b"42"), Some(42));
+    assert_eq!(parse_content_length(b" 42 "), Some(42));
+    assert!(parse_content_length(b"").is_none());
+    assert!(parse_content_length(b"-1").is_none());
     assert!(parse_function_overflow());
 }
 
 fn parse_function_overflow() -> bool {
     // 2^64 overflows u64: rejected.
-    parse_content_length(b"18446744073709551616").is_err()
+    parse_content_length(b"18446744073709551616").is_none()
 }
 
 fn extended(

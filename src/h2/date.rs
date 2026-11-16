@@ -1,15 +1,16 @@
 use std::sync::RwLock;
-use std::time::UNIX_EPOCH;
+use std::time::SystemTime;
 
 use http::HeaderValue;
 
+use crate::date::{cached_date_at, is_fresh};
+
 #[derive(Default)]
 pub(crate) struct DateCache {
-    inner: RwLock<Option<(String, std::time::SystemTime)>>,
+    inner: RwLock<Option<(HeaderValue, SystemTime)>>,
 }
 
 impl DateCache {
-    #[allow(dead_code)]
     #[inline]
     pub fn new() -> Self {
         Self::default()
@@ -17,19 +18,14 @@ impl DateCache {
 
     #[inline]
     pub fn get_date_header_value(&self) -> Option<HeaderValue> {
-        let now = std::time::SystemTime::now();
-        let mut inner = self.inner.read().ok()?;
-        if inner.as_ref().is_none_or(|v| {
-            v.1.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
-                != now.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
-        }) {
-            drop(inner);
-            let value = httpdate::fmt_http_date(now);
-            let mut innerw = self.inner.write().ok()?;
-            innerw.replace((value, now));
-            drop(innerw);
-            inner = self.inner.read().ok()?;
+        let now = SystemTime::now();
+        {
+            let inner = self.inner.read().ok()?;
+            if is_fresh(&inner, now) {
+                return inner.as_ref().map(|(value, _)| value.clone());
+            }
         }
-        HeaderValue::from_str(inner.as_ref().map(|v| v.0.as_str()).unwrap_or("")).ok()
+        let mut inner = self.inner.write().ok()?;
+        cached_date_at(&mut inner, now)
     }
 }

@@ -26,7 +26,6 @@
 //! All methods are polling-based: the connection driver runs the request
 //! stream on its own task, and the transport's flow control shows up as
 //! `Pending`.
-#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -34,7 +33,7 @@ use std::task::{Context, Poll, Waker};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::ready;
-use http::header::{HeaderMap, HeaderName, HeaderValue};
+use http::header::{HeaderMap, HeaderValue};
 use http::{Method, Request, StatusCode, Uri, Version};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
@@ -48,6 +47,7 @@ use crate::h3::frame::{
 use crate::h3::qpack::{Decoder, Encoder, QpackError, UnblockedSection};
 use crate::h3::settings::LocalSettings;
 use crate::h3::transport::BidiStream;
+use crate::request::{field_name, is_invalid_field, parse_content_length};
 
 /// A failure on a request stream.
 ///
@@ -214,20 +214,6 @@ impl SharedCodecs {
         }
     }
 
-    /// Drains and returns every waiter parked on shared codec state, so
-    /// the caller can wake them after releasing the lock.
-    ///
-    /// Waking a waiter whose section is still blocked is harmless: it
-    /// re-polls, finds nothing, and re-registers.
-    #[inline]
-    pub(crate) fn take_waiters(&self) -> Vec<Waker> {
-        self.waiters
-            .lock()
-            .drain()
-            .map(|(_, waker)| waker)
-            .collect()
-    }
-
     /// Drains and returns waiters only for the given stream IDs.
     #[inline]
     pub(crate) fn take_waiters_for(&self, ids: &[u64]) -> Vec<Waker> {
@@ -296,7 +282,6 @@ pub(crate) struct RequestStream {
     // Send state.
     sent_headers: bool,
     sent_trailers: bool,
-    sent_fin: bool,
     pending_send: PendingSend,
     send_buf: VecDeque<Bytes>,
 }
@@ -329,16 +314,9 @@ impl RequestStream {
             recv_finished: false,
             sent_headers: false,
             sent_trailers: false,
-            sent_fin: false,
             pending_send: PendingSend::None,
             send_buf: VecDeque::new(),
         }
-    }
-
-    /// The QUIC stream ID of this request stream.
-    #[inline]
-    pub(crate) fn id(&self) -> u64 {
-        self.stream_id
     }
 
     /// Polls for the initial HEADERS frame and decodes it into the
@@ -887,36 +865,6 @@ fn now() -> u64 {
         .as_nanos() as u64
 }
 
-/// Parses a content-length header value into a `u64`; anything but
-/// bare digits (optionally framed by OWS) is malformed.
-#[inline]
-fn parse_content_length(value: &[u8]) -> Result<u64, StreamError> {
-    let start = match value
-        .iter()
-        .position(|byte| *byte != b' ' && *byte != b'\t')
-    {
-        // Empty or all-whitespace.
-        None => return Err(StreamError::Message),
-        Some(start) => start,
-    };
-    let end = value
-        .iter()
-        .rposition(|byte| *byte != b' ' && *byte != b'\t')
-        .unwrap_or(start);
-    let value = &value[start..=end];
-    if value.is_empty() || value.iter().any(|byte| !byte.is_ascii_digit()) {
-        return Err(StreamError::Message);
-    }
-    let mut result: u64 = 0;
-    for &byte in value {
-        result = result
-            .checked_mul(10)
-            .and_then(|n| n.checked_add((byte - b'0') as u64))
-            .ok_or(StreamError::Message)?;
-    }
-    Ok(result)
-}
-
 /// Builds an `http::Request` from a decoded field section, enforcing the
 /// RFC 9114 Section 4.1 pseudo-header rules:
 ///
@@ -957,11 +905,11 @@ fn build_request(
             }
         } else {
             pseudo_done = true;
-            if connection_specific(&name, &value) {
+            if is_invalid_field(&name, &value) {
                 return Err(StreamError::Message);
             }
             if name.as_ref() == b"content-length" {
-                let value = parse_content_length(value.as_ref())?;
+                let value = parse_content_length(value.as_ref()).ok_or(StreamError::Message)?;
                 if let Some(previous) = content_length {
                     if previous != value {
                         // Content-Length ambiguity
@@ -972,7 +920,7 @@ fn build_request(
                 }
             }
             regular.push((
-                field_name(&name)?,
+                field_name(&name).ok_or(StreamError::Message)?,
                 HeaderValue::from_maybe_shared(value).map_err(|_| StreamError::Message)?,
             ));
         }
@@ -1075,44 +1023,16 @@ fn build_uri(
     }
 }
 
-/// A connection-specific field, which makes an HTTP/3 message malformed (RFC 9114
-/// Section 4.2): `TE` is allowed only as `trailers` (h3spec
-/// "MUST treat a request with connection as malformed" and its siblings.)
-#[inline]
-fn connection_specific(name: &[u8], value: &[u8]) -> bool {
-    const FIELDS: [&[u8]; 5] = [
-        b"connection",
-        b"keep-alive",
-        b"proxy-connection",
-        b"transfer-encoding",
-        b"upgrade",
-    ];
-    FIELDS.iter().any(|f| name.eq_ignore_ascii_case(f))
-        || (name.eq_ignore_ascii_case(b"te") && !value.eq_ignore_ascii_case(b"trailers"))
-}
-
-/// Converts a decoded header list into a `HeaderMap`; pseudo-headers are
-/// invalid in a trailer section (RFC 9114 Section 4.1).
-/// A field name, which in HTTP/3 must be lowercase: `HeaderName` accepts
-/// `X-Upper` and lowercases it (RFC 9114 Section 4.2).
-#[inline]
-fn field_name(name: &[u8]) -> Result<HeaderName, StreamError> {
-    if name.iter().any(u8::is_ascii_uppercase) {
-        return Err(StreamError::Message);
-    }
-    HeaderName::from_bytes(name).map_err(|_| StreamError::Message)
-}
-
 #[inline]
 fn header_map(headers: Vec<(Bytes, Bytes)>) -> Result<HeaderMap, StreamError> {
     // `try_with_capacity` reports the map's capacity instead of panicking
     // on a section with more fields than the map can ever hold.
     let mut map = HeaderMap::try_with_capacity(headers.len()).unwrap_or_default();
     for (name, value) in headers {
-        if name.first() == Some(&b':') || connection_specific(&name, &value) {
+        if name.first() == Some(&b':') || is_invalid_field(&name, &value) {
             return Err(StreamError::Message);
         }
-        let name = field_name(&name)?;
+        let name = field_name(&name).ok_or(StreamError::Message)?;
         let value = HeaderValue::from_maybe_shared(value).map_err(|_| StreamError::Message)?;
         // `try_append` reports the map's capacity instead of panicking.
         if map.try_append(name, value).is_err() {

@@ -8,6 +8,8 @@ use bytes::{Buf, Bytes};
 use futures_util::StreamExt;
 use tokio::io::{AsyncWrite, ReadBuf};
 
+use crate::upgrade_bridge::UpgradedSendStreamBridge;
+
 /// Wraps request stream in read and write halves for an
 /// upgraded connection.
 ///
@@ -22,12 +24,11 @@ pub(super) fn pair(
     reset_rx: kanal::AsyncReceiver<u32>,
     wake_tx: kanal::AsyncSender<()>,
 ) -> (H2Upgraded, UpgradedSendStreamTask) {
-    let (tx, rx) = kanal::bounded_async(1);
-    let (error_tx, error_rx) = oneshot::async_channel();
+    let (send_stream, rx, error_tx) = UpgradedSendStreamBridge::channel();
 
     (
         H2Upgraded {
-            send_stream: UpgradedSendStreamBridge { tx, error_rx },
+            send_stream,
             inner: inner_rx,
             inner_fut: None,
             buf: Bytes::new(),
@@ -114,11 +115,6 @@ impl tokio::io::AsyncRead for H2Upgraded {
     }
 }
 
-struct UpgradedSendStreamBridge {
-    tx: kanal::AsyncSender<Box<[u8]>>,
-    error_rx: oneshot::AsyncReceiver<std::io::Error>,
-}
-
 impl AsyncWrite for H2Upgraded {
     #[inline]
     fn poll_write(
@@ -126,31 +122,15 @@ impl AsyncWrite for H2Upgraded {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-
-        let n = buf.len();
-        match std::pin::pin!(self.send_stream.tx.send(buf.into())).poll(cx) {
-            Poll::Ready(Ok(())) => return Poll::Ready(Ok(n)),
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(_task_dropped)) => {
-                // If the task dropped, check whether it did so with an error;
-                // otherwise it is a broken pipe.
-            }
-        };
-        match Pin::new(&mut self.send_stream.error_rx).poll(cx) {
-            Poll::Ready(Ok(reason)) => Poll::Ready(Err(std::io::Error::other(reason))),
-            Poll::Ready(Err(_task_dropped)) => {
-                Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        Pin::new(&mut self.send_stream).poll_write(cx, buf)
     }
 
     #[inline]
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.send_stream).poll_flush(cx)
     }
 
     #[inline]
@@ -158,12 +138,7 @@ impl AsyncWrite for H2Upgraded {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        let _ = self.send_stream.tx.close();
-        match Pin::new(&mut self.send_stream.error_rx).poll(cx) {
-            Poll::Ready(Ok(reason)) => Poll::Ready(Err(std::io::Error::other(reason))),
-            Poll::Ready(Err(_task_dropped)) => Poll::Ready(Ok(())),
-            Poll::Pending => Poll::Pending,
-        }
+        Pin::new(&mut self.send_stream).poll_shutdown(cx)
     }
 }
 

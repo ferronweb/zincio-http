@@ -120,9 +120,6 @@ pub struct PeerSettings {
     pub(crate) enable_push: u32,
     pub(crate) initial_window_size: u32,
     pub(crate) max_frame_size: usize,
-    /// Kept for the field block decoder's bomb protection (C2).
-    #[allow(dead_code)]
-    pub(crate) max_header_list_size: u32,
 }
 
 impl Default for PeerSettings {
@@ -136,7 +133,6 @@ impl Default for PeerSettings {
             // before the peer's SETTINGS arrives.
             initial_window_size: DEFAULT_CONNECTION_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
-            max_header_list_size: u32::MAX,
         }
     }
 }
@@ -759,7 +755,7 @@ impl ConnBody {
         ResBE: std::error::Error + 'static,
     {
         ConnBody {
-            inner: Box::pin(BodyAdapter(Some(Box::pin(body)))),
+            inner: Box::pin(BodyAdapter { inner: Some(body) }),
         }
     }
 }
@@ -802,11 +798,13 @@ fn e2io<E: std::fmt::Display>(e: E) -> std::io::Error {
 
 /// Adapts an arbitrary body whose error is not `io::Error` into one
 /// that is (the stream layer only deals in `io::Error`).
-struct BodyAdapter<ResB>(Option<Pin<Box<ResB>>>);
+struct BodyAdapter<ResB> {
+    inner: Option<ResB>,
+}
 
 impl<ResB, ResBE> Body for BodyAdapter<ResB>
 where
-    ResB: Body<Data = Bytes, Error = ResBE>,
+    ResB: Body<Data = Bytes, Error = ResBE> + Unpin,
     ResBE: std::error::Error + 'static,
 {
     type Data = Bytes;
@@ -814,18 +812,18 @@ where
 
     #[inline]
     fn poll_frame(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        let this = self.get_mut();
-        let Some(inner) = this.0.as_mut() else {
+        let this = self.as_mut().get_mut();
+        let Some(inner) = this.inner.as_mut() else {
             return Poll::Ready(None);
         };
-        match inner.as_mut().poll_frame(cx) {
+        match Pin::new(inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(e2io(error)))),
             Poll::Ready(None) => {
-                this.0 = None;
+                this.inner = None;
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
@@ -834,7 +832,7 @@ where
 
     #[inline]
     fn size_hint(&self) -> http_body::SizeHint {
-        match &self.0 {
+        match &self.inner {
             Some(body) => body.size_hint(),
             None => http_body::SizeHint::default(),
         }

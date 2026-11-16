@@ -58,6 +58,8 @@
 //! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(any(feature = "h1", feature = "h2", feature = "h3"))]
+mod date;
 mod early_hints;
 mod ext;
 #[cfg(feature = "h1")]
@@ -67,7 +69,13 @@ mod h2;
 #[cfg(feature = "h3")]
 mod h3;
 mod incoming;
+#[cfg(any(feature = "h2", feature = "h3"))]
+mod request;
+#[cfg(any(feature = "h2", feature = "h3"))]
+mod response;
 mod upgrade;
+#[cfg(any(feature = "h2", feature = "h3"))]
+mod upgrade_bridge;
 
 #[cfg(all(any(feature = "h2", feature = "h3"), feature = "unstable-internals"))]
 pub mod hpack;

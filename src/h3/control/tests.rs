@@ -51,15 +51,6 @@ impl MockStream {
     fn sink(&self) -> std::sync::Arc<parking_lot::Mutex<VecDeque<Option<Bytes>>>> {
         Arc::clone(&self.inbound)
     }
-
-    #[inline]
-    fn take_outbound(&mut self) -> Bytes {
-        let mut joined = BytesMut::new();
-        for chunk in self.outbound.drain(..) {
-            joined.extend_from_slice(&chunk);
-        }
-        joined.freeze()
-    }
 }
 
 impl RecvStream for MockStream {
@@ -134,12 +125,6 @@ impl MockConn {
             log: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             shutdown_code: None,
         }
-    }
-
-    /// Queues a peer uni stream preloaded with a mock reader.
-    #[inline]
-    fn peer_uni(log: SendLog) -> Box<dyn UniStream> {
-        Box::new(MockStream::new(log))
     }
 }
 

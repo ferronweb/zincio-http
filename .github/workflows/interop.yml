@@ -1,12 +1,5 @@
 name: Interop
 
-# Drives real third-party HTTP clients against the native server from
-# containers. See ../interop/README.md for what this buys and why.
-#
-# Every scenario runs on every pull request, as decided: the cheap clients build
-# their image in seconds, and a regression that only shows up against a real
-# client should not be able to sit on `main` for a day.
-
 on:
   push:
     branches: ["main"]
@@ -15,8 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # The suite skips itself when Docker is unreachable, which is convenient for
-  # contributors but must not hide a broken runner here.
   ZINCIO_INTEROP_REQUIRE: "1"
 
 jobs:
@@ -31,9 +22,7 @@ jobs:
           workspaces: interop
       - uses: docker/setup-buildx-action@v4
 
-      # Built here so the images are warm before the tests start, and so a
-      # broken Dockerfile fails with a clear message instead of surfacing as a
-      # matrix full of container-start failures.
+      # Built here so to cache the images, and so the build errors would fail clearly
       - name: Build Docker images
         working-directory: interop
         run: chmod +x build-docker.sh && ./build-docker.sh --cache-from type=gha --cache-to type=gha,mode=max

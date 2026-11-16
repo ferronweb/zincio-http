@@ -1,7 +1,5 @@
 name: h2spec
 
-# HTTP/2 conformance gate for the native backend. Builds the `h2spec_server`
-# example and runs it against h2spec with `--strict`, gating CI on the result.
 on:
   push:
     branches: ["main"]
@@ -32,8 +30,6 @@ jobs:
           ./h2spec --version
 
       - name: Run h2spec conformance
-        # scripts/h2spec.sh builds the example (with --features h2), waits for
-        # readiness, runs h2spec --strict, and propagates its exit code.
         run: bash scripts/h2spec.sh
 
       - name: Upload h2spec report

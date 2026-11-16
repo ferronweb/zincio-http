@@ -321,7 +321,7 @@ where
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
         ResE: std::error::Error + 'static,
         ResBE: std::error::Error + 'static,
-        EF: FnOnce(bool) -> EFut,
+        EF: FnOnce(http::StatusCode) -> EFut,
         EFut: std::future::Future<Output = Result<Response<EResB>, EResE>>,
         EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin + 'static,
         EResE: std::error::Error + 'static,
@@ -363,7 +363,14 @@ where
                     return Ok(());
                 }
                 Ok(Some(Err(e))) => {
-                    if let Ok(mut response) = error_fn(false).await {
+                    let status_code = if e.kind() == std::io::ErrorKind::InvalidData
+                        && e.to_string().contains("request head too large")
+                    {
+                        http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+                    } else {
+                        http::StatusCode::BAD_REQUEST
+                    };
+                    if let Ok(mut response) = error_fn(status_code).await {
                         response
                             .headers_mut()
                             .insert(header::CONNECTION, HeaderValue::from_static("close"));
@@ -384,7 +391,7 @@ where
                 }
                 Err(_) => {
                     // Timeout error
-                    if let Ok(mut response) = error_fn(true).await {
+                    if let Ok(mut response) = error_fn(http::StatusCode::REQUEST_TIMEOUT).await {
                         response
                             .headers_mut()
                             .insert(header::CONNECTION, HeaderValue::from_static("close"));
@@ -644,7 +651,7 @@ where
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
         ResE: std::error::Error + 'static,
         ResBE: std::error::Error + 'static,
-        EF: FnOnce(bool) -> EFut,
+        EF: FnOnce(http::StatusCode) -> EFut,
         EFut: std::future::Future<Output = Result<Response<EResB>, EResE>>,
         EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin + 'static,
         EResE: std::error::Error + 'static,
@@ -665,14 +672,8 @@ where
         ResE: std::error::Error + 'static,
         ResBE: std::error::Error + 'static,
     {
-        self.handle_with_error_fn(request_fn, |is_timeout| async move {
-            let mut response = Response::builder();
-            if is_timeout {
-                response = response.status(http::StatusCode::REQUEST_TIMEOUT);
-            } else {
-                response = response.status(http::StatusCode::BAD_REQUEST);
-            }
-            response.body(Empty::new())
+        self.handle_with_error_fn(request_fn, |status_code| async move {
+            Response::builder().status(status_code).body(Empty::new())
         })
     }
 }

@@ -376,7 +376,15 @@ where
             let mut req = httparse::Request::new(&mut []);
             let status = req
                 .parse_with_uninit_headers(&head, headers)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                .map_err(|e| match e {
+                    // Used to signal this would be 431 error than 400
+                    httparse::Error::TooManyHeaders => std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "request head too large",
+                    ),
+
+                    e => std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+                })?;
             if status.is_partial() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,

@@ -3058,7 +3058,6 @@ name = "zincio-http"
 version = "0.4.17"
 dependencies = [
  "bytes",
- "futures-executor",
  "futures-util",
  "http",
  "http-body",

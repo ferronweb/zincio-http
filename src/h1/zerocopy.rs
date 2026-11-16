@@ -229,7 +229,7 @@ where
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
         ResE: std::error::Error + 'static,
         ResBE: std::error::Error + 'static,
-        EF: FnOnce(bool) -> EFut,
+        EF: FnOnce(http::StatusCode) -> EFut,
         EFut: std::future::Future<Output = Result<Response<EResB>, EResE>>,
         EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin + 'static,
         EResE: std::error::Error + 'static,
@@ -250,14 +250,8 @@ where
         ResE: std::error::Error + 'static,
         ResBE: std::error::Error + 'static,
     {
-        self.handle_with_error_fn(request_fn, |is_timeout| async move {
-            let mut response = Response::builder();
-            if is_timeout {
-                response = response.status(http::StatusCode::REQUEST_TIMEOUT);
-            } else {
-                response = response.status(http::StatusCode::BAD_REQUEST);
-            }
-            response.body(Empty::new())
+        self.handle_with_error_fn(request_fn, |status_code| async move {
+            Response::builder().status(status_code).body(Empty::new())
         })
     }
 }

@@ -130,7 +130,7 @@ pub trait HttpProtocol: Sized {
         ResB: Body<Data = bytes::Bytes, Error = ResBE> + Unpin + 'static,
         ResE: std::error::Error + 'static,
         ResBE: std::error::Error + 'static,
-        EF: FnOnce(bool) -> EFut,
+        EF: FnOnce(http::StatusCode) -> EFut,
         EFut: std::future::Future<Output = Result<Response<EResB>, EResE>>,
         EResB: Body<Data = bytes::Bytes, Error = EResBE> + Unpin + 'static,
         EResE: std::error::Error + 'static,

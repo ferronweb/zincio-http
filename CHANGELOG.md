@@ -14,6 +14,7 @@
 - Fixed HTTP/3 server deadlocking on stream header read timeout ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/67))
 - Fixed possible HPACK dynamic table desynchronization caused by stream reset while decoding a HEADERS frame.
 - Fixed some HTTP/2 connections unexpectedly closing due to stream resets
+- Fixed upgraded HTTP/2 and HTTP/3 streams (such as WebSocket over HTTP/2) stalling when the application writes faster than the peer reads and has nothing to read itself.
 - Hardened HTTP/2 and HTTP/3 header compression table size setting handling
 - Improved 100 Continue response handling for HTTP/1.x
 - The library now needs a `unstable-internals` Cargo feature (disabled by default) to expose unstable HTTP/1.x and HTTP/2 protocol internals (**breaking change**).

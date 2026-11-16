@@ -121,3 +121,91 @@ fn websocket_over_h2_reaches_the_handler_and_tunnels_both_ways() {
             drop((client, server));
         });
 }
+
+/// The server speaks first and at length while the client sends nothing (a
+/// WebSocket server's first message): a megabyte from a task that only writes
+/// arrives whole, so a write that found the tunnel full is woken when it has
+/// room again.
+#[test]
+fn websocket_over_h2_carries_what_the_server_writes_unasked() {
+    const SIZE: usize = 1 << 20;
+    zincio::RuntimeBuilder::new()
+        .enable_timer(true)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(1 << 16);
+            let server = zincio::spawn(async move {
+                Http2::new(
+                    server_io,
+                    Http2Options::default().enable_connect_protocol(true),
+                )
+                .handle(|mut request: Request<Incoming>| async move {
+                    let upgrade = zincio_http::prepare_upgrade(&mut request);
+                    zincio::spawn(async move {
+                        use tokio::io::AsyncWriteExt as _;
+                        let mut upgraded = upgrade.unwrap().await.unwrap();
+                        let message: Vec<u8> = (0..SIZE).map(|i| (i % 251) as u8).collect();
+                        for chunk in message.chunks(16 * 1024) {
+                            upgraded.write_all(chunk).await.unwrap();
+                        }
+                        upgraded.shutdown().await.unwrap();
+                    });
+
+                    Ok::<_, std::io::Error>(
+                        Response::builder()
+                            .status(StatusCode::SWITCHING_PROTOCOLS)
+                            .body(http_body_util::Empty::new())
+                            .unwrap(),
+                    )
+                })
+                .await
+            });
+
+            let (client, connection) = h2::client::handshake(client_io).await.unwrap();
+            zincio::spawn(async move {
+                let _ = connection.await;
+            });
+            let mut client = client.ready().await.unwrap();
+            for _ in 0..100 {
+                if client.is_extended_connect_protocol_enabled() {
+                    break;
+                }
+                zincio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(client.is_extended_connect_protocol_enabled());
+
+            let mut request = Request::builder()
+                .method(Method::CONNECT)
+                .uri("https://example.com/chat")
+                .body(())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(h2::ext::Protocol::from_static("websocket"));
+            let (response, _up) = client.send_request(request, false).unwrap();
+            let response = zincio::time::timeout(Duration::from_secs(5), response)
+                .await
+                .expect("the response head")
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut down = response.into_body();
+
+            let mut received = Vec::with_capacity(SIZE);
+            loop {
+                let chunk = zincio::time::timeout(Duration::from_secs(5), down.data())
+                    .await
+                    .unwrap_or_else(|_| panic!("stalled after {} of {SIZE} bytes", received.len()));
+                let Some(chunk) = chunk else { break };
+                let chunk = chunk.unwrap();
+                let _ = down.flow_control().release_capacity(chunk.len());
+                received.extend_from_slice(&chunk);
+            }
+            assert_eq!(received.len(), SIZE);
+            assert!(received
+                .iter()
+                .enumerate()
+                .all(|(i, b)| *b == (i % 251) as u8));
+            drop((client, server));
+        });
+}

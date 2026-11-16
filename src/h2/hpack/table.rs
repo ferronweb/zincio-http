@@ -203,9 +203,9 @@ const STATIC_TABLE: [(&[u8], &[u8]); 61] = [
 pub(crate) const STATIC_LEN: usize = 61;
 
 /// Below this many dynamic entries, `find`/`find_name` use a linear scan
-/// (cheap early exits for common headers); at or above it they use the
-/// perfect-hash static maps plus the hash-map dynamic index. Tiny tables
-/// favour the scan; large tables favour the hash map.
+/// (cheap early exits for common headers)
+///
+/// Tiny tables favor the scan, while large tables favor the hash map.
 const HYBRID_THRESHOLD: usize = 32;
 
 /// The entry-size overhead (RFC 7541 Section 4.1).
@@ -216,14 +216,12 @@ const ENTRY_OVERHEAD: usize = 32;
 pub struct Header {
     name: Bytes,
     value: Bytes,
-    /// Cached RFC 7541 Section 4.1 size (overhead + name + value), so
-    /// eviction and accounting never recompute it.
     size: usize,
 }
 
 impl Header {
     /// Creates a header field from raw name/value bytes. Names are used
-    /// verbatim (no case normalization), which allows HTTP/2 pseudo
+    /// without case normalization, which allows HTTP/2 pseudo
     /// headers (`:method`, `:status`, ...).
     #[inline]
     pub fn new(name: impl Into<Bytes>, value: impl Into<Bytes>) -> Self {
@@ -441,9 +439,7 @@ impl Table {
     }
 
     /// Drops `entry` from the lookup maps if it is still the stored newest
-    /// match for its key. Back-eviction only ever removes the oldest entry,
-    /// so a map value equals `combined` only when `entry` was the sole
-    /// occurrence of its key in the table.
+    /// match for its key.
     #[inline]
     fn evict_entry(&mut self, entry: &Header, combined: usize) {
         if !self.maintain_maps {

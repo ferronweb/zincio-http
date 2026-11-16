@@ -24,9 +24,7 @@ pub(crate) fn huffman_encoded_len_if_shorter(value: &[u8]) -> Option<usize> {
 /// Encodes a string literal (raw or Huffman-coded) into `out`.
 ///
 /// When `huffman_len` is present, the literal is Huffman-coded (honoring the
-/// flag even for empty values); otherwise it is written verbatim. The output
-/// buffer is reserved up front so the whole literal is appended without
-/// intermediate reallocations.
+/// flag even for empty values); otherwise it is written as-is.
 #[inline]
 pub(crate) fn encode(out: &mut Vec<u8>, value: &[u8], huffman_len: Option<usize>) {
     if let Some(huffman_len) = huffman_len {
@@ -116,9 +114,6 @@ mod tests {
             Err(HpackError::InvalidString)
         ));
 
-        // Huffman expansion is checked too: "ASDF" compresses to fewer
-        // bits than 4 bytes? No — pick a value that expands: use a string
-        // of 5-bit symbols which packs >4 chars into 4 bytes.
         let mut out = Vec::new();
         encode(
             &mut out,
@@ -126,7 +121,6 @@ mod tests {
             Some(huffman_encoded_len(b"0123456789")),
         );
         let mut off = 0;
-        // Wire length < 10 but decoded length is 10.
         assert!(decode(&out, &mut off, 9).is_err());
     }
 }

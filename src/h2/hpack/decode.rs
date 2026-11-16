@@ -82,9 +82,6 @@ impl Decoder {
         #[cfg(feature = "unstable-internals")]
         if let Some(size) = self.queued_size_update.take() {
             self.max_table_size = size;
-            // The table capacity itself is driven by size-update
-            // representations in the wire; the queued value only raises
-            // the protocol cap.
         }
 
         let mut off = 0usize;

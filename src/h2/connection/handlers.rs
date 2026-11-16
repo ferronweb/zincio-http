@@ -72,11 +72,7 @@ where
     }
 
     /// Enforces the CONTINUATION-flood limit (CVE-2024-27919) for a stream
-    /// whose field block is still open. Each frame (the opening HEADERS and
-    /// every CONTINUATION) adds one; once the count passes the connection's
-    /// allowed maximum the offending stream is reset with `RST_STREAM`
-    /// `PROTOCOL_ERROR` and the open block is abandoned so the connection
-    /// keeps serving other streams.
+    /// whose field block is still open.
     #[inline]
     pub(crate) fn check_continuation_flood(&mut self, stream_id: u32) {
         let over_limit = match self.streams.get_mut(&stream_id) {
@@ -128,11 +124,9 @@ where
                 .write_reset(&mut self.out, stream_id, Reason::RefusedStream.code());
             return;
         }
-        // Bounded small: the message channel only ever holds a few
-        // messages (headers, a handful of body chunks, trailers, close)
+        // The message channel would only ever hold a few messages
+        // (headers, a handful of body chunks, trailers, close)
         // because every send wakes the drive loop, which drains it.
-        // Larger bounds only preallocate memory per stream (heap profiles
-        // showed ~76 MiB across 38k streams for 32/16).
         let (reset_tx, reset_rx) = kanal::bounded_async(1);
         let (msg_tx, msg_rx) = kanal::bounded_async(8);
 
@@ -750,11 +744,12 @@ where
     }
 
     /// Attempts to drain every stream's queued DATA after the flow
-    /// control windows opened up. For per-stream `WINDOW_UPDATE` only
-    /// that stream is pumped; for connection `WINDOW_UPDATE` we use
-    /// deficit round-robin (quantum = max_frame_size) for fairness so a
-    /// single 10 MiB response cannot hog `conn_window` and starve
-    /// small responses.
+    /// control windows opened up.
+    ///
+    /// - For per-stream `WINDOW_UPDATE` only that stream is pumped.
+    /// - For connection `WINDOW_UPDATE` we use deficit round-robin
+    ///   for fairness so a single 10 MiB response cannot starve
+    ///   small responses.
     #[inline]
     pub(crate) fn drain_pending_data(&mut self, stream_id: Option<u32>) {
         if let Some(id) = stream_id {
@@ -922,20 +917,6 @@ where
 
     /// Drains every stream task's outbound channel, turning messages
     /// into frames. Called after each read and whenever a wake fires.
-    /// Uses reused scratch buffers so the steady state allocates nothing;
-    /// cross-stream order was never defined (tasks run concurrently), but
-    /// each stream's FIFO order is preserved.
-    ///
-    /// Flow-control backpressure (RFC 9113 Section 6.9): when a stream
-    /// still has queued DATA that the peer's window could not absorb
-    /// (`pending_data` non-empty), its channel is left alone. The stream
-    /// task then parks on the bounded channel (capacity 8) instead of
-    /// the connection buffering an unbounded response and eventually
-    /// resetting a slow consumer (notably hyper clients fetching large
-    /// static files through a proxy, where WINDOW_UPDATEs arrive later
-    /// than the file chunks). The queued DATA is flushed by a later
-    /// WINDOW_UPDATE via `drain_pending_data`; only then is the channel
-    /// drained again.
     #[inline]
     pub(crate) fn drain_outbound(&mut self) {
         let mut ids = std::mem::take(&mut self.outbound_ids);
@@ -1031,14 +1012,9 @@ where
                     // continued after the trailer section).
                     return;
                 }
-                // No queue-depth reset here: when the peer's window is
-                // exhausted the chunk stays in `pending_data` and the
-                // channel is left undrained (see `drain_outbound`), so
-                // the stream task parks on backpressure until a
-                // WINDOW_UPDATE reopens the window. Resetting a slow
-                // consumer with INTERNAL_ERROR broke large (>=10MB)
-                // static files behind hyper clients, whose WINDOW_UPDATEs
-                // legitimately lag the file chunks.
+                // No queue-depth reset here, so to not resetting slow
+                // consumers with INTERNAL_ERROR, which breaks large (>=10MB)
+                // static file responses.
                 entry.response_started = true;
                 entry.pending_data.push_back((data, end_stream));
                 self.pump_stream_data(stream_id);
@@ -1080,11 +1056,7 @@ where
                 self.streams.remove(&stream_id);
             }
             StreamMsg::Closed => {
-                // The task ended for good. If the whole response was
-                // already sent (END_STREAM flushed), tear down now.
-                // Otherwise flow control left DATA queued in
-                // `pending_data`; keep the stream alive so a later
-                // WINDOW_UPDATE (via `drain_pending_data`) can flush it.
+                // The task ended for good...
                 let entry = match self.streams.get_mut(&stream_id) {
                     Some(entry) => entry,
                     None => return,

@@ -6,14 +6,7 @@
 //! `SETTINGS_HEADER_TABLE_SIZE` to the HPACK encoder and
 //! `SETTINGS_MAX_FRAME_SIZE` to the outgoing frame writer), answers
 //! SETTINGS frames with ACK, echoes PING, and reports protocol
-//! violations with GOAWAY before closing.
-//!
-//! Frame parsing and validation happen in [`super::codec`]; this module
-//! adds the connection- and stream-level wiring: per-stream state,
-//! request/response header parsing, request dispatch to the handler,
-//! response framing, and the connection-level error handling that
-//! h2spec's `http2/4.3`, `http2/5.1`, `http2/6.1`, `http2/6.2`,
-//! `http2/6.4` and `http2/8.1` groups cover.
+//! violations with GOAWAY before closing.\
 
 use std::{
     collections::VecDeque,
@@ -73,19 +66,13 @@ pub struct ConnectionOptions {
     pub idle_timeout: Option<Duration>,
     /// Maximum number of RST_STREAM frames we send in response to
     /// protocol errors made by the peer over the connection's lifetime.
-    /// `None` disables the limit; when it is exceeded the connection
-    /// closes with GOAWAY `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
     pub max_local_error_reset_streams: Option<usize>,
     /// Maximum number of streams the peer reset before we produced a
-    /// final response for them (CVE-2023-44487 rapid reset). This covers
-    /// both streams reset before dispatch and dispatched streams
-    /// cancelled before the handler responded. `None` disables the
-    /// limit; when it is exceeded the connection closes with GOAWAY
-    /// `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
+    /// final response for them (CVE-2023-44487 rapid reset).
     pub max_pending_accept_reset_streams: Option<usize>,
     /// Maximum number of frames that may compose a single, not-yet-finalized
-    /// header field block (HEADERS/CONTINUATION). Beyond this a stream is
-    /// reset as a CONTINUATION flood (CVE-2024-27919).
+    /// header field block (HEADERS/CONTINUATION), used for CONTINUATION flood
+    /// (CVE-2024-27919) detection.
     pub max_continuation_frames: usize,
 }
 
@@ -97,8 +84,6 @@ impl Default for ConnectionOptions {
             send_date_header: true,
             max_concurrent_streams: 100,
             initial_stream_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
-            // RFC 9113 Section 6.9.1: the connection window starts at
-            // 65535; the peer raises it with WINDOW_UPDATE.
             initial_connection_window_size: DEFAULT_CONNECTION_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE as u32,
             max_header_list_size: u32::MAX,
@@ -128,9 +113,6 @@ impl Default for PeerSettings {
         PeerSettings {
             header_table_size: 4096,
             enable_push: 1,
-            // RFC 9113 Section 6.5.2: 65535 until the peer's SETTINGS
-            // says otherwise. Using 1MiB here would let us over-send
-            // before the peer's SETTINGS arrives.
             initial_window_size: DEFAULT_CONNECTION_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
         }
@@ -248,29 +230,22 @@ pub struct Connection<Io> {
     /// channel; the loop drains channels between reads.
     wake_tx: Option<kanal::AsyncSender<()>>,
     /// Stream ids whose FIELD_BLOCK completed (END_HEADERS seen) and
-    /// awaits finalization; drained one per frame by
-    /// [`Connection::process_frames`] in FIFO order for fairness.
+    /// awaits finalization.
     complete_blocks: VecDeque<u32>,
     /// Maximum number of frames a single header field block may span before
     /// it is treated as a CONTINUATION flood and reset (CVE-2024-27919).
     max_continuation_frames: usize,
     /// Scratch buffer reused by [`Connection::drain_pending_data`] to
-    /// snapshot stream ids before pumping (avoids a per-call
-    /// allocation).
+    /// snapshot stream ids before pumping.
     drain_ids: Vec<u32>,
-    /// Scratch buffers reused by [`Connection::drain_outbound`]: the ids
-    /// with pending messages and the drained messages themselves.
-    /// Restored (empty, capacity kept) after each drain, so the steady
-    /// state allocates nothing per read/wake.
+    /// Scratch buffers reused by [`Connection::drain_outbound`].
     outbound_ids: Vec<u32>,
     outbound_msgs: Vec<StreamMsg>,
     /// Highest stream id opened by the peer (RFC 9113 Section 5.1.1).
     highest_stream_id: u32,
     /// A connection error is pending; the loop stops after flushing.
     closing: bool,
-    /// Graceful shutdown is in progress: the first GOAWAY is sent and we
-    /// only drain already-open streams until they finish or the drain
-    /// window elapses (RFC 9113 Section 6.8).
+    /// Whether the raceful shutdown is in progress.
     graceful: bool,
     /// The peer sent GOAWAY: it opens no more streams, and the connection
     /// closes once the ones it has are done (RFC 9113 Section 6.8).
@@ -315,13 +290,8 @@ where
             preface_timeout,
             header_read_timeout,
             streams: FxHashMap::default(),
-            // RFC 9113 Section 6.9.1: connection send window starts at
-            // 65535; the peer's WINDOW_UPDATEs raise it.
             conn_window: DEFAULT_CONNECTION_WINDOW_SIZE as i64,
             closed_streams: FxHashSet::default(),
-            // Grows on demand up to the 4096-entry LRU bound in
-            // `mark_closed`; preallocating would cost ~16 KiB per
-            // connection even when it only ever holds a few ids.
             closed_order: VecDeque::new(),
             opts: ConnectionOptions::default(),
             local_error_resets: 0,
@@ -380,11 +350,6 @@ where
 
     /// Serves requests to completion: peer EOF, GOAWAY received,
     /// preface timeout, or an unrecoverable protocol error.
-    ///
-    /// Each decoded request starts a stream task running `request_fn`
-    /// (a clone-free sequential borrow: the loop owns the closure for
-    /// the connection's lifetime). Responses are framed onto the wire
-    /// by this task as the stream tasks emit them.
     #[inline]
     pub async fn handle<F, Fut, ResB, ResBE, ResE>(
         mut self,
@@ -399,14 +364,12 @@ where
         ResE: std::error::Error + 'static,
     {
         self.opts = options;
-        // Apply the negotiated native settings before the handshake.
         self.request_decoder
             .set_max_header_list_size(self.opts.max_header_list_size as usize);
         self.decoder
             .set_max_frame_size(self.opts.max_frame_size as usize);
-        // Resolved CONTINUATION-flood limit (CVE-2024-27919); `Http2Options`
-        // already applies the safe default when none was configured.
         self.max_continuation_frames = options.max_continuation_frames;
+
         match self.read_preface().await? {
             None => return Ok(()), // preface timeout: close quietly
             Some(false) => {
@@ -467,11 +430,6 @@ where
 
         let (wake_tx, wake_rx) = kanal::bounded_async(1);
         self.wake_tx = Some(wake_tx);
-        // Seed the output buffers modestly instead of pre-reserving tens
-        // of kilobytes: typical responses are far smaller than
-        // `max_frame_size`, and both buffers grow geometrically on demand.
-        // Pre-reserving 64 KiB + `max_frame_size` per connection showed up
-        // as ~65 MiB at 1000 connections in heap profiles.
         self.out.reserve(8 * 1024);
         self.frame_buffer.reserve(1024);
 
@@ -482,10 +440,7 @@ where
         while !close && !((self.graceful || self.peer_goaway) && self.streams.is_empty()) {
             let wake_recv = wake_rx.recv().fuse();
             let read = tokio::io::AsyncReadExt::read(&mut self.io, &mut buf).fuse();
-            // Graceful-shutdown signal: never fires without a token. The
-            // clone lives for the loop iteration so the future can borrow
-            // it. Stack-pinned on purpose: boxing this future heap-allocated
-            // once per loop iteration in heap profiles.
+
             let shutdown_token = self.shutdown.clone();
             let shutdown_fut = async move {
                 match shutdown_token {
@@ -494,12 +449,13 @@ where
                 }
             }
             .fuse();
+
             pin_mut!(wake_recv);
             pin_mut!(read);
             pin_mut!(shutdown_fut);
+
             // Idle timeout (RFC 9113 Section 10.5): no frame received from the
-            // peer within `idle_timeout` => graceful shutdown. Recreated each
-            // iteration so it measures the gap since the last received frame.
+            // peer within `idle_timeout` => graceful shutdown.
             let idle_unfuse = std::pin::pin!(async {
                 if let Some(s) = &mut idle_sleep {
                     s.await;
@@ -593,10 +549,7 @@ where
     }
 
     /// Ends a connection the peer may still be writing to (after a GOAWAY
-    /// either way): our side closes, then what the peer still sends is read
-    /// and dropped until it closes too, for [`LINGER`] at most. Closing with
-    /// unread data makes the kernel reset the connection, and the peer may
-    /// then lose our last frames (nginx's lingering close).
+    /// either way).
     async fn linger(&mut self) {
         let _ = tokio::io::AsyncWriteExt::shutdown(&mut self.io).await;
         let mut buf = [0u8; 4096];
@@ -608,10 +561,9 @@ where
 
     /// Reads the 24-octet client preface.
     ///
-    /// Returns `Ok(None)` on timeout (the connection closes quietly —
-    /// answering a peer that never spoke is meaningless), `Ok(Some(
-    /// true))` on a match, and `Ok(Some(false))` when the peer sent
-    /// something else (the caller answers with GOAWAY).
+    /// Returns `Ok(None)` on timeout, `Ok(Some(true))` on a match,
+    /// and `Ok(Some(false))` when the peer sent something else
+    /// (the caller then answers with GOAWAY).
     #[inline]
     async fn read_preface(&mut self) -> std::io::Result<Option<bool>> {
         let mut magic = [0u8; CLIENT_PREFACE.len()];
@@ -779,9 +731,7 @@ impl Body for ConnBody {
 }
 
 /// Converts any displayable error into an [`io::Error`] without requiring
-/// `Send + Sync` (the native connection layer only needs the message, not the
-/// source; this keeps the public trait free of `Send`/`Sync` so it works on
-/// runtimes such as `zincio` that do not demand them).
+/// `Send + Sync`.
 #[inline]
 fn e2io<E: std::fmt::Display>(e: E) -> std::io::Error {
     #[derive(Debug)]

@@ -10,11 +10,6 @@
 //! The decoder is incremental: feed it bytes with [`FrameDecoder::extend`]
 //! and call [`FrameDecoder::next_frame`]; it returns `Ok(None)` until a
 //! complete frame is buffered.
-//!
-//! This module is the frame layer of the native HTTP/2 implementation
-//! (see CUSTOM_HTTP2_IMPL.md); stream and connection semantics
-//! (flow control, settings tracking, lifecycle) live in later steps on
-//! top of it.
 
 use super::error::{H2Error, Reason};
 use bytes::{Bytes, BytesMut};
@@ -26,16 +21,11 @@ pub const DEFAULT_MAX_FRAME_SIZE: usize = 16_384;
 /// The largest settable frame payload size (2^24-1).
 pub const MAX_FRAME_SIZE_LIMIT: usize = 16_777_215;
 /// The initial connection flow-control window (RFC 9113 Section 6.9.1).
-/// The connection window is always 65535 octets initially; unlike the
-/// per-stream window it cannot be raised via SETTINGS, only via
-/// WINDOW_UPDATE.
 pub const DEFAULT_CONNECTION_WINDOW_SIZE: u32 = 65_535;
 /// The initial per-stream flow-control window this server advertises via
 /// SETTINGS (RFC 9113 Section 6.5.2). The protocol default is 65535, but
 /// advertising a larger window (1MiB) reduces round-trips for large
-/// responses. This is *only* for the window we advertise; the window the
-/// peer advertises to us defaults to 65535 per RFC until its SETTINGS
-/// says otherwise.
+/// responses.
 pub const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 1_048_576;
 /// The largest legal flow-control window (2^31-1).
 pub const MAX_WINDOW_SIZE: u32 = 2_147_483_647;
@@ -77,9 +67,7 @@ pub struct Setting {
 
 /// A parsed frame. Payloads are zero-copy views over the decoder's
 /// buffer (kept alive by `Bytes` refcounting until the frame is
-/// dropped); the connection layer reassembles field blocks from the
-/// `block` fragments and applies stream semantics. Padding, when
-/// present, is validated and stripped.
+/// dropped).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     Data {
@@ -130,7 +118,7 @@ pub enum Frame {
         end_headers: bool,
         block: Bytes,
     },
-    /// A frame type this implementation does not understand; ignored by
+    /// A frame type this implementation does not understand, ignored by
     /// the connection (RFC 9113 Section 4.1).
     Unknown {
         typ: u8,
@@ -189,8 +177,8 @@ impl FrameDecoder {
     }
 
     /// Forgets any open field block. Used when a stream is reset mid-block
-    /// (e.g. a CONTINUATION flood) so subsequent frames are not all treated
-    /// as protocol violations for the now-gone stream.
+    /// (for example a CONTINUATION flood) so subsequent frames are not all
+    /// treated as protocol violations for the now-gone stream.
     #[inline]
     pub fn clear_block(&mut self) {
         self.block_stream = None;
@@ -445,9 +433,6 @@ fn parse_frame(
     Ok(frame)
 }
 
-/// A zero-copy view of `payload` covering exactly the range `body`
-/// points at: the leading octets were trimmed by padding/priority
-/// fields and `pad_len` trailing octets by padding.
 #[inline]
 fn payload_slice(payload: &Bytes, body: &[u8], pad_len: usize) -> Bytes {
     let start = payload.len() - pad_len - body.len();

@@ -2,22 +2,7 @@
 //! stream, message-passing with the connection task over bounded
 //! channels.
 //!
-//! Division of labour:
-//!
-//! - The connection task ([`super::connection::Connection`]) owns the
-//!   socket, the HPACK encoder/decoder and the frame writer. It
-//!   validates HEADERS field blocks, runs the stream-state machine
-//!   (idle/open/half-closed/closed), and turns messages from the
-//!   stream tasks into frames.
-//! - Each stream task runs the user's `request_fn` and pipes the
-//!   response body back over a [`mpsc`] channel ([`StreamMsg`]). It
-//!   never touches the wire or the HPACK tables.
-//! - The request body handed to the user is [`H2Body`], fed by the
-//!   connection task over a second bounded channel ([`BodyMsg`]); peer
-//!   RST_STREAM frames arrive on a separate channel the task polls
-//!   beside the response future.
-//!
-//! Flow control lives on the connection side (C2): this module queues
+//! Flow control lives on the connection side: this module queues
 //! DATA via `StreamEntry::pending_data` and the connection drains it
 //! under the flow-control windows.
 
@@ -51,9 +36,8 @@ pub(crate) enum BodyMsg {
     EndStream,
 }
 
-/// Messages a stream task sends to the connection task. The connection
-/// turns them into frames; order is preserved (FIFO), so the response
-/// header always precedes its body.
+/// Messages a stream task sends to the connection task (the connection
+/// turns them into frames).
 #[derive(Debug)]
 pub(crate) enum StreamMsg {
     /// Final response headers. `end_stream` sets END_STREAM on the
@@ -85,8 +69,7 @@ pub(crate) enum StreamMsg {
 /// Per-stream state kept by the connection task (RFC 9113 Section 5.1).
 pub(crate) struct StreamEntry {
     /// Request body delivery (receiver lives in the task's [`H2Body`]).
-    /// `None` when the request ended with HEADERS (typical GET): no body
-    /// frames can arrive, so no channel is allocated at all.
+    /// `None` when the request ended with HEADERS (typical GET).
     pub(crate) body_tx: Option<kanal::AsyncSender<BodyMsg>>,
     /// Peer RST_STREAM notifications (receiver lives in the task).
     pub(crate) reset_tx: kanal::AsyncSender<u32>,
@@ -108,10 +91,7 @@ pub(crate) struct StreamEntry {
     /// The request HEADERS were parsed and the task spawned.
     pub(crate) request_started: bool,
     /// The stream task produced a final response (HEADERS, DATA, or
-    /// trailers). Interim (1xx) messages do not set this. Used for
-    /// rapid-reset accounting (CVE-2023-44487): a peer reset before any
-    /// final response counts toward the reset budget even when the
-    /// request was already dispatched.
+    /// trailers). Interim (1xx) messages do not set this.
     pub(crate) response_started: bool,
     /// The peer sent END_STREAM on this stream (request side done).
     pub(crate) remote_ended: bool,
@@ -123,17 +103,16 @@ pub(crate) struct StreamEntry {
     pub(crate) data_sum: u64,
     /// A trailer section was already received (only one is allowed).
     pub(crate) trailers_seen: bool,
-    /// The stream task has finished and signalled `StreamMsg::Closed`
-    /// (its message channel is now empty). The stream itself lives on
-    /// until `local_ended` so any flow-controlled `pending_data` can
-    /// still be drained by WINDOW_UPDATE.
+    /// The stream task has finished and its message channel is now empty.
+    ///
+    /// The stream itself lives on until `local_ended` so any flow-controlled
+    /// `pending_data` can still be drained by WINDOW_UPDATE.
     pub(crate) task_done: bool,
     /// Server-side flow-control window for this stream (RFC 9113
     /// Section 6.9): DATA payloads we may still send.
     pub(crate) send_window: i64,
     /// DATA chunks queued because the peer's flow-control window ran
-    /// out; each entry is `(bytes, end_stream)`. Drained as the window
-    /// opens up (WINDOW_UPDATE or SETTINGS_INITIAL_WINDOW_SIZE).
+    /// out. Each entry is `(bytes, end_stream)`.
     pub(crate) pending_data: VecDeque<(Bytes, bool)>,
     /// Deficit for DRR fairness when draining `pending_data` across
     /// streams under connection flow-control.
@@ -194,9 +173,10 @@ impl StreamEntry {
         std::mem::take(&mut self.field_block)
     }
 
-    /// Forwards a request body message to the task; `Ok(false)` when the
-    /// task has gone away or when there is no body channel (the request
-    /// ended with HEADERS, so no body reader exists).
+    /// Forwards a request body message to the task.
+    ///
+    /// Return `Ok(false)` when the task has gone away or when there
+    /// is no body channel (for example, the request ended with HEADERS).
     #[inline]
     pub(crate) async fn send_body(&mut self, msg: BodyMsg) -> bool {
         match &self.body_tx {
@@ -212,11 +192,6 @@ impl StreamEntry {
 }
 
 /// The request body type exposed as `Incoming::H2`.
-///
-/// Backed by a bounded channel the connection task fills with DATA
-/// frames and trailers. Polling marks the `send_continue_body` flag so
-/// the driver can emit `100 Continue` on first demand (RFC 9113
-/// Section 8.1.1).
 pub(crate) struct H2Body {
     inner: kanal::AsyncReceiver<BodyMsg>,
     inner_fut: Option<Pin<Box<kanal::ReceiveFuture<'static, BodyMsg>>>>,
@@ -306,8 +281,7 @@ pub(crate) struct ParsedRequest {
     pub(crate) content_length: Option<u64>,
     /// The request carries `expect: 100-continue`.
     pub(crate) expect_continue: bool,
-    /// A tunnel: CONNECT, plain or extended. The stream after the response
-    /// head carries its bytes both ways (Section 8.5).
+    /// A tunnel: CONNECT, plain or extended.
     pub(crate) is_connect: bool,
     /// An extended CONNECT's `:protocol` (RFC 8441).
     pub(crate) protocol: Option<Protocol>,
@@ -321,14 +295,6 @@ pub(crate) struct MalformedRequest;
 
 /// Validates a decoded request field block and builds an
 /// `http::Request`-ready representation.
-///
-/// Every violation is a *stream* error (malformed request, RFC 9113
-/// Section 8.1.2.6): pseudo-header rules (Section 8.1.2.1), required
-/// and unique request pseudo-headers (Section 8.1.2.3),
-/// connection-specific header fields (Section 8.1.2.2) and
-/// `content-length` syntax (Section 8.1.2.6). `connect_protocol`: the
-/// server sent SETTINGS_ENABLE_CONNECT_PROTOCOL, so an extended CONNECT
-/// is allowed (RFC 8441).
 #[inline]
 pub(crate) fn parse_request(
     headers: &[Header],

@@ -4,12 +4,6 @@
 //! dynamic table across blocks. The encoder's table mirrors the peer's
 //! decoder table: it honors the peer's `SETTINGS_HEADER_TABLE_SIZE` via
 //! [`Encoder::queue_size_update`].
-//!
-//! Unlike the API sketch in `CUSTOM_HTTP2_IMPL.md` (`&[(HeaderName,
-//! &[u8])]`), [`Encoder::encode`] takes [`Header`] pairs, because
-//! `http::HeaderName` rejects HTTP/2 pseudo-headers (`:method`, ...)
-//! while they are a first-class part of HPACK header blocks; it also
-//! mirrors the [`Decoder`](super::decode::Decoder) API.
 
 use super::{
     integer, string,
@@ -78,11 +72,11 @@ impl Encoder {
 
     /// Encodes `headers` as a single header block appended to `out`.
     ///
-    /// Non-sensitive headers are encoded with incremental indexing
-    /// (RFC 7541 Section 6.2.1) and added to the dynamic table; exact
-    /// matches use the indexed representation (Section 6.1). Sensitive
-    /// headers ([`NEVER_INDEXED`]) are encoded never-indexed (Section
-    /// 6.2.3) and never added to the table.
+    /// - Non-sensitive headers are encoded with incremental indexing
+    ///   (RFC 7541 Section 6.2.1) and added to the dynamic table.
+    /// - Exact matches use the indexed representation (Section 6.1).
+    /// - Sensitive headers ([`NEVER_INDEXED`]) are encoded
+    ///   never-indexed (Section 6.2.3) and never added to the table.
     #[inline]
     pub fn encode(&mut self, headers: &[Header], out: &mut Vec<u8>) {
         if let Some(size) = self.queued_size_update.take() {
@@ -117,9 +111,6 @@ impl Encoder {
                         }
                     }
                     self.encode_string(out, header.value());
-                    // Store the header by cloning its already-owned `Bytes`
-                    // (a refcount bump) instead of re-copying the name and
-                    // value into fresh heap allocations.
                     self.table.add(header.clone());
                 }
             }

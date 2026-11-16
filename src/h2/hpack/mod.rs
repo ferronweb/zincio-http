@@ -1,8 +1,4 @@
 //! HPACK (RFC 7541) header compression.
-//!
-//! Public surface: [`Decoder`], [`Encoder`], and [`Header`], re-exported at
-//! [`crate::hpack`]. The shared primitives (Huffman coding, prefix integers)
-//! live in the crate-level [`crate::hpack`] module, which QPACK also consumes.
 
 pub(crate) use crate::hpack::{huffman, integer};
 

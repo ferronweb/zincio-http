@@ -437,8 +437,7 @@ where
                             Poll::Pending => return ServicePoll::Pending,
                         }
                         // The write itself happens later on the
-                        // connection task; enqueueing is the failure
-                        // surface that matters here.
+                        // connection task...
                         sender.into_inner().send(Ok(())).ok();
                         continue;
                     }
@@ -453,10 +452,7 @@ where
         }
     }
 
-    /// Enqueues one outbound message, parking until the channel has
-    /// room. `Pending` means the sender is parked (by `poll_ready` it
-    /// will be woken when the connection task drains); `Ready(())`
-    /// means the message was delivered or the connection is gone.
+    /// Enqueues one outbound stream message.
     #[inline]
     fn send(
         msg_tx: &mut kanal::AsyncSender<StreamMsg>,
@@ -504,9 +500,7 @@ where
         Poll::Pending
     }
 
-    /// Pipes the response body to the connection: DATA frames, then an
-    /// END_STREAM (empty DATA when the body yields nothing more, or a
-    /// HEADERS block carrying trailers).
+    /// Pipes the response body to the connection.
     #[allow(clippy::too_many_arguments)]
     #[inline]
     fn poll_body(

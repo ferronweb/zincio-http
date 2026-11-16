@@ -142,9 +142,7 @@ impl AsyncWrite for H2Upgraded {
     }
 }
 
-/// Drives the send half of an upgraded stream: forwards the consumer's
-/// writes from the kanal bridge onto the request stream and finishes it
-/// when the consumer closes, propagating any stream error back.
+/// Drives the send half of an upgraded stream.
 pub(super) struct UpgradedSendStreamTask {
     inner_fut: Option<Pin<Box<kanal::SendFuture<'static, super::stream::StreamMsg>>>>,
     inner: kanal::AsyncSender<super::stream::StreamMsg>,

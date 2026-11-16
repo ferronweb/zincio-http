@@ -6,10 +6,6 @@ use crate::h2::stream::StreamMsg;
 
 /// Runs a connection against a scripted peer over an in-memory
 /// duplex stream and collects the server's reply bytes.
-///
-/// The preface timeout needs the zincio timer, which does not run
-/// under a plain tokio test runtime (same pattern as the h1
-/// slowloris test), so a zincio runtime is built per call.
 #[inline]
 fn run_connection(
     preface: &[u8],
@@ -190,9 +186,6 @@ fn settings_are_applied_and_acked() {
 
 #[test]
 fn settings_ack_with_payload_is_connection_error() {
-    // SETTINGS with the ACK flag and a non-empty payload: the codec
-    // rejects it and the connection reports FRAME_SIZE_ERROR.
-    // Payload: one Setting { id: 0x04, value: 0 }.
     let bad = [
         0x00, 0x00, 0x06, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
     ];
@@ -200,6 +193,7 @@ fn settings_ack_with_payload_is_connection_error() {
     frames.extend_from_slice(&bad);
     let reply = run_connection(CLIENT_PREFACE, &frames, Some(Duration::from_secs(5)), None);
     let decoded = decode_frames(&reply);
+    // Should reject with GOAWAY, since the frame is invalid...
     assert!(matches!(
         decoded.last().and_then(|f| match f {
             Frame::GoAway { error_code, .. } => Some(*error_code),
@@ -240,9 +234,6 @@ fn goaway_from_peer_ends_connection() {
 
 #[test]
 fn idle_timeout_closes_connection() {
-    // With an idle timeout set, a peer that completes the handshake and
-    // then goes silent must be shut down gracefully with a GOAWAY
-    // (RFC 9113 Section 10.5).
     let reply = run_connection(
         CLIENT_PREFACE,
         &client_script(|_, _| {}),
@@ -250,6 +241,8 @@ fn idle_timeout_closes_connection() {
         Some(Duration::from_millis(30)),
     );
     let decoded = decode_frames(&reply);
+
+    // Timed out...
     assert!(decoded.iter().any(|f| matches!(f, Frame::GoAway { .. })));
 }
 
@@ -490,10 +483,6 @@ fn inject_responded_stream(conn: &mut Connection<tokio::io::DuplexStream>, id: u
 
 #[test]
 fn rapid_reset_after_dispatch_hits_budget() {
-    // CVE-2023-44487: a valid HEADERS (dispatched inline) followed by an
-    // immediate RST_STREAM must count toward the reset budget even though
-    // `request_started` is already true. With a budget of 2, the third
-    // HEADERS+RST round must close the connection with ENHANCE_YOUR_CALM.
     let block = valid_get_block();
     let mut script = client_script(|_, _| {});
     {
@@ -524,8 +513,6 @@ fn rapid_reset_after_dispatch_hits_budget() {
 
 #[test]
 fn dispatched_unresponded_reset_hits_budget_unit() {
-    // Unit-level: dispatched streams with no final response count, even
-    // though `request_started` is true.
     let (_client, server) = tokio::io::duplex(1 << 16);
     let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
     conn.opts.max_pending_accept_reset_streams = Some(2);
@@ -545,8 +532,6 @@ fn dispatched_unresponded_reset_hits_budget_unit() {
 
 #[test]
 fn reset_after_response_started_does_not_hit_budget() {
-    // Resets after a final response started are ordinary cancellations
-    // of in-flight work and must not consume the rapid-reset budget.
     let (_client, server) = tokio::io::duplex(1 << 16);
     let mut conn = Connection::new(server, Some(Duration::from_secs(5)), None);
     conn.opts.max_pending_accept_reset_streams = Some(2);
@@ -564,21 +549,17 @@ fn reset_after_response_started_does_not_hit_budget() {
 
 #[test]
 fn continuation_flood_is_reset_without_closing_connection() {
-    // A peer that opens a header field block (HEADERS without END_HEADERS)
-    // and never closes it, streaming CONTINUATION frames forever, is a
-    // CONTINUATION flood (CVE-2024-27919). Past `max_continuation_frames`
-    // the offending stream is reset with PROTOCOL_ERROR and the connection
-    // keeps serving other streams (no GOAWAY).
     let limit = 3usize;
     let writer = FrameWriter::new(DEFAULT_MAX_FRAME_SIZE);
     let mut script = Vec::new();
     writer.write_settings(&mut script, &[]);
-    // HEADERS opens the block (frame #1 of the flood budget).
     writer.write_headers(&mut script, 1, false, false, None, &[0x82]);
+
     // Two CONTINUATION frames stay within the budget (frames #2, #3).
     for _ in 0..2 {
         writer.write_continuation(&mut script, 1, false, &[0x82]);
     }
+
     // The third CONTINUATION exceeds the limit and triggers the reset.
     writer.write_continuation(&mut script, 1, false, &[0x82]);
     let reply = run_connection_with(
@@ -590,6 +571,7 @@ fn continuation_flood_is_reset_without_closing_connection() {
             ..Default::default()
         },
     );
+
     let decoded = decode_frames(&reply);
     assert!(
         decoded.iter().any(|f| matches!(
@@ -689,12 +671,11 @@ fn stream_error_callback_reports_malformed_request() {
 
 #[test]
 fn connection_error_is_returned_as_err() {
-    // A SETTINGS frame with ACK and a payload is a connection error
-    // (FRAME_SIZE_ERROR): handle() must return Err with a clear message
-    // instead of silently closing with Ok.
+    // Some invalid SETTINGS frame...
     let bad = [
         0x00, 0x00, 0x06, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
     ];
+
     let mut frames = client_script(|_, _| {});
     frames.extend_from_slice(&bad);
     let script: Vec<u8> = [CLIENT_PREFACE, &frames].concat();
@@ -815,8 +796,6 @@ fn complete_field_block_within_limit_is_not_reset() {
 #[test]
 fn frames_after_a_peer_goaway_are_answered_before_closing() {
     // RFC 9113 Section 6.8: a GOAWAY stops new streams, not the connection.
-    // What came with it is still read and answered, so the connection does
-    // not close on unread data (which the kernel turns into a reset).
     let mut script = client_script(|_, _| {});
     let writer = FrameWriter::new(DEFAULT_MAX_FRAME_SIZE);
     writer.write_goaway(&mut script, 0, 0x00, b"bye");
@@ -836,8 +815,6 @@ fn frames_after_a_peer_goaway_are_answered_before_closing() {
 #[test]
 fn data_past_the_content_length_is_a_stream_error_at_once() {
     // RFC 9113 Section 8.1.1: the DATA frames must add up to `content-length`.
-    // Excess is malformed as soon as it arrives, whether or not the handler
-    // still reads the body (it may stop at the declared length).
     let mut encoder = Encoder::new(4096);
     let mut block = Vec::new();
     encoder.encode(

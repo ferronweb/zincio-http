@@ -20,15 +20,6 @@ use crate::{h1::Http1, Incoming};
 
 /// Coordinates `100 Continue` between the request-body consumer and the
 /// socket reader.
-///
-/// The handler signals interest by polling the body; the socket reader sends
-/// `100 Continue` before blocking for body bytes. Both sides run as separate
-/// tasks, so the flag alone is not enough: if the reader is already parked in
-/// a socket read when the handler polls, nothing would wake it and a client
-/// that strictly waits for `100` before sending the body would deadlock
-/// (curl masks this with its 1s expect-timeout fallback; OkHttp does not).
-/// The `Notify` closes that race: setting interest always wakes the reader,
-/// and the reader always re-checks interest after waking.
 #[derive(Default)]
 pub(crate) struct ContinueSignal {
     wanted: AtomicBool,
@@ -312,9 +303,6 @@ where
     ) -> Result<Option<usize>, std::io::Error> {
         match send_continue_body.as_ref() {
             Some(signal) => {
-                // futures_util::select rather than tokio::select!: the latter
-                // needs tokio's `macros` feature, which this crate does not
-                // enable.
                 let notified = std::pin::pin!(signal.notify.notified());
                 let fill = std::pin::pin!(self.fill_buf());
                 match futures_util::future::select(notified, fill).await {
@@ -396,10 +384,8 @@ where
                 ));
             }
 
-            // Convert httparse HTTP request to `http` one
             let (body_tx, body_rx) = kanal::bounded_async(2);
 
-            // Detect 100-continue and create flag before building the body
             let is_100_continue = self.options.send_continue_response
                 && req.headers.iter().any(|h| {
                     h.name.eq_ignore_ascii_case("expect")

@@ -1393,7 +1393,9 @@ async fn fixture_client_header_read_timeout_resets_the_stream() {
         );
         let mut buf = BytesMut::new();
         Frame::Headers(section.block).encode(&mut buf);
-        send.write_all(&buf[..buf.len() / 2]).await.expect("write half");
+        send.write_all(&buf[..buf.len() / 2])
+            .await
+            .expect("write half");
 
         let code = tokio::time::timeout(Duration::from_secs(5), reset_code(recv))
             .await

@@ -7,10 +7,6 @@ mod server {
     use zincio::RuntimeBuilder;
     use zincio_http::{Http2, Http2Options, HttpProtocol};
 
-    // h2spec conformance server. Listen on 127.0.0.1:8080 and answer every
-    // request with a 200 response carrying a small non-empty body. Run via
-    // `scripts/h2spec.sh`, which starts this binary, waits for readiness, runs
-    // h2spec with `--strict`, and propagates its exit code.
     pub fn main() -> std::io::Result<()> {
         // In production, multiple zincio threads would be used...
         let runtime = RuntimeBuilder::new().enable_timer(true).build()?;

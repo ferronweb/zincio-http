@@ -15,10 +15,12 @@
 - Fixed some HTTP/2 connections unexpectedly closing due to stream resets
 - Hardened HTTP/2 and HTTP/3 header compression table size setting handling
 - Improved 100 Continue response handling for HTTP/1.x
-- The library now needs a `unstable-internals` Cargo feature (disabled by default) to expose unstable HTTP/1.x and HTTP/2 protocol internals.
+- The library now needs a `unstable-internals` Cargo feature (disabled by default) to expose unstable HTTP/1.x and HTTP/2 protocol internals (**breaking change**).
+- The library now accepts `http::StatusCode` instead of a boolean in the error handler function (**breaking change**).
 - The HTTP/1.x server now allows responses to intentionally set `Connection: close` to close HTTP/1.x connections.
 - The HTTP/1.x server now checks the sent response body size against declared `Content-Length` value.
 - The HTTP/1.x server now enforces a chunk size limit of 4096 bytes (similar to `net/http` in Go).
+- The HTTP/1.x server now returns 431 error by default when requests sent too large header block instead of 400.
 - The HTTP/2 server now immediately marks streams exceeding the concurrent stream limit as closed.
 - The HTTP/2 server now properly advertises maximum header list size setting.
 - The HTTP/3 server now checks the request body size against declared `Content-Length` value (similarly to the HTTP/2 server).

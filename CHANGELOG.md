@@ -11,6 +11,7 @@
 - Fixed HTTP/2 client being able to break max frame size setting on the server by setting in on the client side on SETTINGS frame.
 - Fixed HTTP/2 custom initial connection window size setting being applied incorrectly.
 - Fixed HTTP/2 idle timeout being applied incorrectly (timeout for any HTTP/2 server activity instead of intended HTTP/2 peer activity)
+- Fixed HTTP/3 server deadlocking on stream header read timeout ([thank you, @Iaotle](https://github.com/ferronweb/zincio-http/pull/67))
 - Fixed possible HPACK dynamic table desynchronization caused by stream reset while decoding a HEADERS frame.
 - Fixed some HTTP/2 connections unexpectedly closing due to stream resets
 - Hardened HTTP/2 and HTTP/3 header compression table size setting handling

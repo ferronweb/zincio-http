@@ -1366,6 +1366,53 @@ async fn reset_code(mut recv: quinn::RecvStream) -> Option<u64> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixture_client_header_read_timeout_resets_the_stream() {
+    with_timeout(async {
+        let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
+        let options = Http3Options::new().header_read_timeout(Some(Duration::from_millis(200)));
+        let server = NativeServer::start(server_conn, options, |_request| async move {
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(Bytes::from_static(b"still-alive")))
+                    .expect("response"),
+            )
+        });
+
+        let mut fixture = Fixture::new(client_conn).await;
+        // Half of a HEADERS frame, and then nothing.
+        let (mut send, recv) = fixture.conn.open_bi().await.expect("open request stream");
+        let section = fixture.encoder.encode_section(
+            0,
+            &pseudo(&[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":authority", "localhost"),
+                (":path", "/slow"),
+            ]),
+        );
+        let mut buf = BytesMut::new();
+        Frame::Headers(section.block).encode(&mut buf);
+        send.write_all(&buf[..buf.len() / 2]).await.expect("write half");
+
+        let code = tokio::time::timeout(Duration::from_secs(5), reset_code(recv))
+            .await
+            .expect("the stream was not reset after the header read timeout");
+        assert_eq!(code, Some(0x010c), "H3_REQUEST_CANCELLED expected");
+
+        // The connection still serves.
+        let (mut send, recv) = fixture.request_get("/ok").await;
+        send.finish().expect("finish request");
+        let (sections, data) = fixture.response(recv).await;
+        assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
+        assert_eq!(data, b"still-alive");
+
+        server.shutdown();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_response_cut_short_is_reset_not_finished() {
     with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;

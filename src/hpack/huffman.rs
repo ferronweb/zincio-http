@@ -2,22 +2,19 @@
 //!
 //! Encoding walks the 257-symbol code table; decoding walks a precomputed
 //! finite-state machine that consumes one encoded byte per table
-//! lookup (vs. one bit per walk in a binary tree). The FSM enforces the
-//! RFC 7541 Section 5.2 rules: the EOS symbol must not appear in the data,
-//! and trailing padding must be at most 7 bits of the EOS code's most
-//! significant bits (all 1-bits).
-//!
-//! The code table data below is specified by RFC 7541 Appendix B; the
-//! literal formatting is taken from the MIT-licensed `h2` crate's generated
-//! `hpack/huffman/table.rs` (<https://github.com/hyperium/h2>). The 4-bit
-//! decode DFA in `huffman_table.rs` is ported from ls-hpack
-//! (<https://github.com/litespeedtech/ls-hpack>), which uses the same RFC
-//! code table.
+//! lookup (vs. one bit per walk in a binary tree).
 
 use super::huffman_table::HUFF_DFA8;
 use super::HpackError;
 
 // __HPACK_HUFFMAN_TABLE__
+
+// The code table data below is specified by RFC 7541 Appendix B; the
+// literal formatting is taken from the MIT-licensed `h2` crate's generated
+// `hpack/huffman/table.rs` (<https://github.com/hyperium/h2>). The 4-bit
+// decode DFA in `huffman_table.rs` is ported from ls-hpack
+// (<https://github.com/litespeedtech/ls-hpack>), which uses the same RFC
+// code table.
 
 /// (bit length, code, most-significant bit first). Entry 256 is EOS.
 const CODES: [(u8, u32); 257] = [
@@ -282,10 +279,6 @@ const CODES: [(u8, u32); 257] = [
 
 /// Encodes `src` using the RFC 7541 Huffman code, appending the encoded
 /// bytes (with EOS-prefix padding to the octet boundary) to `dst`.
-///
-/// The bit accumulator is drained in 32-bit chunks. It therefore holds at
-/// most 61 bits (a 31-bit remainder plus the 30-bit longest code), which
-/// avoids a byte-at-a-time drain for every input symbol.
 #[inline]
 #[cfg(test)]
 pub(crate) fn encode(src: &[u8], dst: &mut Vec<u8>) {
@@ -331,12 +324,9 @@ pub(crate) fn encoded_len(src: &[u8]) -> usize {
 
 /// Decodes a Huffman-encoded string into `dst` (which is cleared first).
 ///
-/// Fails per RFC 7541 Section 5.2 if the EOS symbol appears in the data,
-/// if the data ends mid-code with more than 7 padding bits, or if the
-/// padding is not a prefix of the EOS code. The 8-bit DFA ([`HUFF_DFA8`])
-/// advances one byte per lookup (built at compile time from the 4-bit DFA),
-/// so each encoded byte costs a single table lookup instead of the eight a
-/// bit-by-bit walk would need.
+/// This uses the 8-bit DFA ([`HUFF_DFA8`]), which advances one byte per lookup
+/// (built at compile time from the 4-bit DFA), so each encoded byte costs
+/// a single table lookup instead of the eight a bit-by-bit walk would need.
 #[inline]
 pub(crate) fn decode(src: &[u8], dst: &mut Vec<u8>) -> Result<(), HpackError> {
     dst.clear();

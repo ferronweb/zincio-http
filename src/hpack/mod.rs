@@ -3,14 +3,7 @@
 //! Both header-compression schemes use the same Huffman code
 //! (RFC 7541 Appendix B, reused verbatim by RFC 9204 Section 4.2) and the
 //! same prefix-integer representation (RFC 7541 Section 5.1, reused by
-//! RFC 9204 Section 4.3). These live here, one level up from the protocol
-//! modules that consume them, so neither codec needs to depend on the other.
-//!
-//! Consumers: `h2::hpack` (HPACK) and `h3::qpack` (QPACK).
-//!
-//! This module is also the public `zincio_http::hpack` path: the HPACK
-//! codec surface (`Decoder`, `Encoder`, `Header`) is re-exported from
-//! `h2::hpack`.
+//! RFC 9204 Section 4.3).
 
 pub(crate) mod huffman;
 pub(crate) mod huffman_table;
@@ -20,11 +13,6 @@ pub(crate) mod integer;
 pub use crate::h2::hpack::{Decoder, Encoder, Header};
 
 /// Errors produced by the shared HPACK/QPACK primitives.
-///
-/// The integer and Huffman variants are produced by the shared code; the
-/// remaining variants are produced by the HPACK decoder itself. Callers map
-/// these to protocol errors (`COMPRESSION_ERROR` for HTTP/2, the `0x2xx`
-/// QPACK error family for HTTP/3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 pub enum HpackError {

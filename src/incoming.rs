@@ -14,10 +14,6 @@ use crate::Http1Body;
 ///
 /// `Incoming` is the concrete body type placed inside every
 /// [`Request`](http::Request) passed to the user-supplied handler.
-///
-/// Data frames are yielded as [`bytes::Bytes`] chunks. Trailer frames (like
-/// HTTP/1.1 chunked trailers) are forwarded transparently. The stream ends when
-/// [`Body::poll_frame`] returns `Poll::Ready(None)`.
 #[allow(private_interfaces)]
 pub enum Incoming {
     #[cfg(feature = "h1")]

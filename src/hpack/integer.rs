@@ -1,10 +1,5 @@
 //! Prefixed-integer representation (RFC 7541 Section 5.1, RFC 9204
 //! Section 4.1.1).
-//!
-//! Integers are encoded with an N-bit prefix (2 to 8 bits in QPACK, 5, 6, 7
-//! or 8 in HPACK) followed by zero or more continuation octets carrying 7
-//! bits each. QPACK implementations MUST be able to decode integers up to
-//! and including 62 bits long, so the codec operates on `u64`.
 
 use super::HpackError;
 
@@ -76,8 +71,8 @@ pub(crate) fn decode(
 /// beginning of `buf`, or `None` when `buf` is too short to hold the full
 /// integer (more bytes are required before it can be decoded).
 ///
-/// This lets a streaming parser tell a *truncated* integer (wait for more
-/// bytes) apart from a *malformed* one (the integer's own continuation bytes
+/// This lets a streaming parser tell a truncated integer (wait for more
+/// bytes) apart from a malformed one (the integer's own continuation bytes
 /// are present but invalid) without attempting the decode.
 #[allow(dead_code)]
 #[inline]

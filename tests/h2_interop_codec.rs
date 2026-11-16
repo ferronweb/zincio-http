@@ -1,4 +1,5 @@
-//! Interop test + codec verification
+//! The reference `h2` client and server on a tapped duplex: the bytes each
+//! writes are decoded to check the frame codec on a real session.
 
 #![cfg(all(feature = "h2", feature = "unstable-internals"))]
 

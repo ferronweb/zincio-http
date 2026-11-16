@@ -1,32 +1,22 @@
-//! Interop test: drive a `h2` client against `zincio-http`'s HTTP/2 server
-//! over a real TCP socket.
-//!
-//! The server runs on the `zincio` runtime, and the `h2` client
-//! runs on its own `tokio` runtime in a separate thread.
-//!
-//! This covers the frame codec, preface/settings exchange, HEADERS + DATA,
-//! and flow control end to end against a reference implementation, on the
-//! same transport path the h2spec script uses.
+//! Interop test: the `h2` reference client against the HTTP/2 server over TCP.
 //!
 //! In the `zincio-http` repository, there is "interop" directory containing
 //! a test setup that is used to test interop with more HTTP/2 clients.
 
 #![cfg(feature = "h2")]
 
-use std::sync::mpsc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
-use http_body::Body;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use zincio::net::TcpListener;
 use zincio::RuntimeBuilder;
-use zincio_http::{Http2, Http2Options, HttpProtocol, Incoming};
+use zincio_http::{Http2, Http2Options, HttpProtocol};
 
 #[test]
 fn h2_client_talks_to_native_server() {
-    let (addr_tx, addr_rx) = mpsc::channel::<std::net::SocketAddr>();
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel::<std::net::SocketAddr>();
 
     let server_thread = std::thread::spawn(move || {
         let rt = RuntimeBuilder::new()
@@ -45,26 +35,9 @@ fn h2_client_talks_to_native_server() {
             );
             let _ = conn
                 .handle(|request| async move {
-                    // Echo the request method + path + body length so the
-                    // client can confirm the native server received the
-                    // request intact.
                     let (parts, body) = request.into_parts();
-                    let mut body = std::pin::Pin::from(Box::new(body));
-                    let mut bytes = Vec::new();
-                    while let Some(chunk) =
-                        std::future::poll_fn(|cx| <Incoming as Body>::poll_frame(body.as_mut(), cx))
-                            .await
-                    {
-                        match chunk {
-                            Ok(frame) => {
-                                if let Some(data) = frame.data_ref() {
-                                    bytes.extend_from_slice(data.as_ref());
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    let payload = format!("{} {} {}", parts.method, parts.uri.path(), bytes.len());
+                    let len = body.collect().await.expect("request body").to_bytes().len();
+                    let payload = format!("{} {} {len}", parts.method, parts.uri.path());
                     let response = Response::builder()
                         .status(StatusCode::OK)
                         .body(Full::new(Bytes::from(payload)))
@@ -93,32 +66,26 @@ fn h2_client_talks_to_native_server() {
                 let _ = conn.await;
             });
 
-            // GET: server echoes method + path + body length ("GET / 0").
             let request = Request::builder()
                 .uri("https://example.example/")
                 .body(())
                 .unwrap();
-            let (response_fut, _send_stream) = send_request.send_request(request, true).unwrap();
-            let response = response_fut.await.expect("GET response");
+            let (response, _) = send_request.send_request(request, true).unwrap();
+            let response = response.await.expect("GET response");
             assert_eq!(response.status(), StatusCode::OK);
-            let payload = collect(&mut response.into_body()).await;
-            assert_eq!(payload, b"GET / 0");
+            assert_eq!(collect(&mut response.into_body()).await, b"GET / 0");
 
-            // POST with a body: server echoes "POST /echo 11".
             let request = Request::builder()
                 .method("POST")
                 .uri("https://example.example/echo")
                 .body(())
                 .unwrap();
-            let (response_fut, mut send_stream) =
-                send_request.send_request(request, false).unwrap();
-            send_stream
-                .send_data(Bytes::from_static(b"hello world"), true)
+            let (response, mut body) = send_request.send_request(request, false).unwrap();
+            body.send_data(Bytes::from_static(b"hello world"), true)
                 .expect("send data");
-            let response = response_fut.await.expect("POST response");
+            let response = response.await.expect("POST response");
             assert_eq!(response.status(), StatusCode::OK);
-            let payload = collect(&mut response.into_body()).await;
-            assert_eq!(payload, b"POST /echo 11");
+            assert_eq!(collect(&mut response.into_body()).await, b"POST /echo 11");
         });
     });
 

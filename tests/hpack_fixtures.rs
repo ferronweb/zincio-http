@@ -1,16 +1,17 @@
 //! HPACK fixture corpus: parsing and checks.
 //!
-//! Story files live in `tests/fixtures/hpack/stories/`, see its
-//! `README.md` for more information.
+//! Story files live in `tests/fixtures/hpack/stories/`; see its `README.md`.
 
 #![cfg(all(feature = "h2", feature = "unstable-internals"))]
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+#[path = "common/fixtures.rs"]
+mod fixtures;
+
+use std::{fs, path::Path};
 
 use serde_json::Value;
+
+const STORIES_DIR: &str = "tests/fixtures/hpack/stories";
 
 #[derive(Debug)]
 pub(crate) struct Story {
@@ -22,25 +23,6 @@ pub(crate) struct Case {
     pub(crate) wire: Vec<u8>,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) header_table_size: Option<u32>,
-}
-
-/// All story files in the corpus, sorted for deterministic ordering.
-pub(crate) fn story_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for entry in fs::read_dir("tests/fixtures/hpack/stories").unwrap() {
-        let dir = entry.unwrap();
-        if !dir.path().is_dir() {
-            continue;
-        }
-        for file in fs::read_dir(dir.path()).unwrap() {
-            let file = file.unwrap();
-            if file.path().extension().is_some_and(|e| e == "json") {
-                paths.push(file.path());
-            }
-        }
-    }
-    paths.sort();
-    paths
 }
 
 /// Parses a story file into ordered decode cases.
@@ -59,7 +41,7 @@ pub(crate) fn parse_story(path: &Path) -> Story {
             .get("wire")
             .and_then(Value::as_str)
             .unwrap_or_else(|| panic!("case {seqno}: missing wire"));
-        let wire = parse_hex(wire_hex);
+        let wire = fixtures::parse_hex(wire_hex);
 
         let headers = case
             .get("headers")
@@ -92,36 +74,21 @@ pub(crate) fn parse_story(path: &Path) -> Story {
     Story { cases: parsed }
 }
 
-fn parse_hex(hex: &str) -> Vec<u8> {
-    assert!(
-        hex.len().is_multiple_of(2),
-        "wire hex string has even length"
-    );
-    hex.as_bytes()
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| {
-            let hi = hexval(pair[0]);
-            let lo = hexval(pair[1]);
-            (hi << 4) | lo
+fn strings(headers: Vec<hpack::Header>) -> Vec<(String, String)> {
+    headers
+        .into_iter()
+        .map(|h| {
+            (
+                String::from_utf8(h.name().to_vec()).unwrap(),
+                String::from_utf8(h.value().to_vec()).unwrap(),
+            )
         })
         .collect()
 }
 
-#[inline]
-fn hexval(b: u8) -> u8 {
-    match b {
-        b'0'..=b'9' => b - b'0',
-        b'a'..=b'f' => b - b'a' + 10,
-        b'A'..=b'F' => b - b'A' + 10,
-        _ => panic!("invalid hex digit {b:#x}"),
-    }
-}
-
 #[test]
 fn corpus_parses() {
-    let paths = story_paths();
+    let paths = fixtures::story_paths(STORIES_DIR);
     assert!(
         paths.len() >= 130,
         "expected a substantial fixture corpus, found {} files",
@@ -158,7 +125,7 @@ fn corpus_parses() {
 fn corpus_decodes() {
     let mut failed = Vec::new();
     let mut total = 0usize;
-    for path in story_paths() {
+    for path in fixtures::story_paths(STORIES_DIR) {
         let story = parse_story(&path);
         let mut decoder = hpack::Decoder::new(4096);
         decoder.set_max_header_list_size(64 * 1024);
@@ -171,15 +138,7 @@ fn corpus_decodes() {
             total += 1;
             match got {
                 Ok(headers) => {
-                    let got: Vec<(String, String)> = headers
-                        .into_iter()
-                        .map(|h| {
-                            (
-                                String::from_utf8(h.name().to_vec()).unwrap(),
-                                String::from_utf8(h.value().to_vec()).unwrap(),
-                            )
-                        })
-                        .collect();
+                    let got = strings(headers);
                     if got != expected {
                         failed.push(format!(
                             "{} case {i}: expected {expected:?}, got {got:?}",
@@ -212,7 +171,7 @@ fn corpus_decodes() {
 fn corpus_encode_round_trips() {
     let mut failed = Vec::new();
     let mut total = 0usize;
-    for path in story_paths() {
+    for path in fixtures::story_paths(STORIES_DIR) {
         let story = parse_story(&path);
         let mut encoder = hpack::Encoder::new(4096);
         let mut decoder = hpack::Decoder::new(4096);
@@ -237,15 +196,7 @@ fn corpus_encode_round_trips() {
             total += 1;
             match got {
                 Ok(headers) => {
-                    let got: Vec<(String, String)> = headers
-                        .into_iter()
-                        .map(|h| {
-                            (
-                                String::from_utf8(h.name().to_vec()).unwrap(),
-                                String::from_utf8(h.value().to_vec()).unwrap(),
-                            )
-                        })
-                        .collect();
+                    let got = strings(headers);
                     if got != expected {
                         failed.push(format!(
                             "{} case {i}: expected {expected:?}, got {got:?}",

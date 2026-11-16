@@ -1,12 +1,5 @@
-//! Interop test: a `h3` client (over quinn) and a raw quinn fixture
-//! client against `zincio-http`'s HTTP/3 server over a QUIC loopback
-//! connection.
-//!
-//! The server runs on the `zincio` runtime in its own thread, while
-//! both quinn endpoints live on the `tokio` runtime of the test thread.
-//!
-//! This covers request/response streaming, trailers, concurrency, cancellation
-//! and graceful shutdown against the reference implementation.
+//! HTTP/3 interop tests: an `h3` client and a frame-level QUIC fixture against
+//! the native server.
 //!
 //! In the `zincio-http` repository, there is "interop" directory containing
 //! a test setup that is used to test interop with more HTTP/3 clients.
@@ -14,7 +7,8 @@
 #![cfg(feature = "h3-quinn")]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
     sync::{mpsc, Arc},
@@ -38,12 +32,14 @@ const SETTINGS_QPACK_MAX_TABLE_CAPACITY: u64 = 0x1;
 const SETTINGS_MAX_FIELD_SECTION_SIZE: u64 = 0x6;
 const SETTINGS_QPACK_BLOCKED_STREAMS: u64 = 0x7;
 
+type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
+type H3RequestStream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
 fn loopback() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
 }
 
-/// A connected loopback pair plus the endpoints that keep both halves
-/// alive (quinn tears the connections down if the endpoint is dropped).
+/// A connected loopback pair plus the endpoints that keep both halves alive.
 async fn loopback_pair() -> (Endpoint, Endpoint, quinn::Connection, quinn::Connection) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert_der: quinn::rustls::pki_types::CertificateDer<'static> = cert.cert.into();
@@ -76,42 +72,149 @@ async fn loopback_pair() -> (Endpoint, Endpoint, quinn::Connection, quinn::Conne
     (server_endpoint, client_endpoint, client_conn, server_conn)
 }
 
-/// Runs the native server on a `zincio` runtime in a dedicated thread.
-///
-/// The server is shut down by cancelling `cancel`. The thread then exits
-/// once the connection drains, and `handle`'s result is sent on the
-/// returned channel.
-fn spawn_native_server<F, Fut, ResB, ResBE, ResE>(
-    server_conn: quinn::Connection,
-    options: Http3Options,
+async fn with_timeout_secs<F: Future>(secs: u64, future: F) {
+    tokio::time::timeout(Duration::from_secs(secs), future)
+        .await
+        .expect("test timed out");
+}
+
+async fn with_timeout<F: Future>(future: F) {
+    with_timeout_secs(30, future).await;
+}
+
+/// The native server, running on a zincio runtime in a dedicated thread.
+struct NativeServer {
     cancel: CancellationToken,
-    handler: F,
-) -> (
-    std::thread::JoinHandle<()>,
-    mpsc::Receiver<Result<(), std::io::Error>>,
-)
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<Response<ResB>, ResE>> + Send + 'static,
-    ResB: http_body::Body<Data = Bytes, Error = ResBE> + Send + Unpin + 'static,
-    ResBE: std::error::Error + Send + 'static,
-    ResE: std::error::Error + Send + 'static,
-{
-    let (result_tx, result_rx) = mpsc::channel();
-    let thread = std::thread::spawn(move || {
-        let rt = RuntimeBuilder::new()
-            .enable_timer(true)
-            .build()
-            .expect("zincio runtime");
-        let result = rt.block_on(async move {
-            Http3::new(zincio_http::quinn::Connection::new(server_conn), options)
-                .graceful_shutdown_token(cancel)
-                .handle(handler)
-                .await
+    thread: std::thread::JoinHandle<()>,
+    result: mpsc::Receiver<Result<(), std::io::Error>>,
+}
+
+impl NativeServer {
+    fn start<F, Fut, ResB, ResBE, ResE>(
+        server_conn: quinn::Connection,
+        options: Http3Options,
+        handler: F,
+    ) -> Self
+    where
+        F: Fn(Request<Incoming>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Response<ResB>, ResE>> + Send + 'static,
+        ResB: http_body::Body<Data = Bytes, Error = ResBE> + Send + Unpin + 'static,
+        ResBE: std::error::Error + Send + 'static,
+        ResE: std::error::Error + Send + 'static,
+    {
+        let cancel = CancellationToken::new();
+        let thread_cancel = cancel.clone();
+        let (result_tx, result) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let rt = RuntimeBuilder::new()
+                .enable_timer(true)
+                .build()
+                .expect("zincio runtime");
+            let result = rt.block_on(async move {
+                Http3::new(zincio_http::quinn::Connection::new(server_conn), options)
+                    .graceful_shutdown_token(thread_cancel)
+                    .handle(handler)
+                    .await
+            });
+            result_tx.send(result).ok();
         });
-        result_tx.send(result).ok();
-    });
-    (thread, result_rx)
+        Self {
+            cancel,
+            thread,
+            result,
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    fn finish(self) {
+        let result = self
+            .result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        assert!(result.is_ok(), "server handle: {result:?}");
+        self.thread.join().expect("join server");
+    }
+
+    fn finish_err(self) -> std::io::Error {
+        let result = self
+            .result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server finished");
+        let error = result.expect_err("server should fail");
+        self.thread.join().expect("join server");
+        error
+    }
+
+    fn shutdown(self) {
+        self.cancel.cancel();
+        self.finish();
+    }
+}
+
+/// An `h3` client plus the task that drives its connection.
+struct H3Client {
+    send: H3SendRequest,
+    drive: tokio::task::JoinHandle<()>,
+}
+
+impl H3Client {
+    async fn connect(conn: quinn::Connection) -> Self {
+        let (mut conn, send) = h3::client::builder()
+            .build(h3_quinn::Connection::new(conn))
+            .await
+            .expect("h3 client");
+        let drive = tokio::spawn(async move {
+            let _ = conn.wait_idle().await;
+            std::future::pending::<()>().await;
+        });
+        Self { send, drive }
+    }
+
+    async fn request(&mut self, request: Request<()>) -> H3RequestStream {
+        self.send.send_request(request).await.expect("send request")
+    }
+
+    async fn get(&mut self, path: &str) -> H3RequestStream {
+        self.request(
+            Request::get(format!("https://localhost{path}"))
+                .body(())
+                .unwrap(),
+        )
+        .await
+    }
+
+    async fn post(&mut self, path: &str) -> H3RequestStream {
+        self.request(
+            Request::post(format!("https://localhost{path}"))
+                .body(())
+                .unwrap(),
+        )
+        .await
+    }
+
+    fn shutdown(self) {
+        self.drive.abort();
+    }
+}
+
+async fn read_response_body(stream: &mut H3RequestStream) -> Vec<u8> {
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.recv_data().await.expect("response data") {
+        body.extend_from_slice(chunk.chunk());
+    }
+    body
+}
+
+async fn expect_app_close(conn: &quinn::Connection, code: u64) {
+    match conn.closed().await {
+        quinn::ConnectionError::ApplicationClosed(close) => {
+            assert_eq!(close.error_code.into_inner(), code);
+        }
+        other => panic!("unexpected close: {other:?}"),
+    }
 }
 
 /// Drains the request body, collecting data and any trailers.
@@ -119,19 +222,12 @@ async fn read_body_and_trailers(body: Incoming) -> (Vec<u8>, Option<HeaderMap>) 
     let mut body = Pin::from(Box::new(body));
     let mut bytes = Vec::new();
     let mut trailers = None;
-    while let Some(frame) =
-        std::future::poll_fn(|cx| <Incoming as http_body::Body>::poll_frame(body.as_mut(), cx))
-            .await
-    {
-        match frame {
-            Ok(frame) => {
-                if let Some(data) = frame.data_ref() {
-                    bytes.extend_from_slice(data.as_ref());
-                } else if let Some(t) = frame.trailers_ref() {
-                    trailers = Some(t.clone());
-                }
-            }
-            Err(_) => break,
+    while let Some(frame) = body.frame().await {
+        let Ok(frame) = frame else { break };
+        if let Some(data) = frame.data_ref() {
+            bytes.extend_from_slice(data.as_ref());
+        } else if let Some(t) = frame.trailers_ref() {
+            trailers = Some(t.clone());
         }
     }
     (bytes, trailers)
@@ -161,15 +257,13 @@ struct Fixture {
     conn: quinn::Connection,
     encoder: Encoder,
     decoder: Decoder,
-    /// Kept alive for the fixture's lifetime: quinn auto-FINishes a
-    /// `SendStream` on drop, and closing a critical stream is a connection
-    /// error for the server.
+    /// Kept alive so quinn does not FIN a critical stream.
     #[allow(dead_code)]
     control: quinn::SendStream,
     encoder_stream: quinn::SendStream,
     #[allow(dead_code)]
     decoder_stream: quinn::SendStream,
-    /// The server's QPACK encoder stream (type 0x02), fed to `decoder`.
+    /// The server's QPACK encoder stream (type 0x02).
     server_encoder: Option<quinn::RecvStream>,
     started_at: std::time::Instant,
 }
@@ -179,9 +273,7 @@ impl Fixture {
         Self::new_with_capacity(conn, 0, 0).await
     }
 
-    /// Like [`Fixture::new`], but advertises `capacity` in
-    /// SETTINGS_QPACK_MAX_TABLE_CAPACITY (like Chromium's 65536), so the
-    /// server's encoder may use its dynamic table.
+    /// Advertises a QPACK table capacity, allowing dynamic-table encoding.
     async fn new_with_capacity(conn: quinn::Connection, capacity: u64, blocked: u64) -> Self {
         let mut control = conn.open_uni().await.expect("control stream");
         let mut encoder_stream = conn.open_uni().await.expect("encoder stream");
@@ -242,6 +334,56 @@ impl Fixture {
         (send, recv)
     }
 
+    async fn request_get(&mut self, path: &str) -> (quinn::SendStream, quinn::RecvStream) {
+        self.request_open(&pseudo(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":authority", "localhost"),
+            (":path", path),
+        ]))
+        .await
+    }
+
+    /// Reads a complete response with a stateless decoder.
+    async fn response(
+        &mut self,
+        mut recv: quinn::RecvStream,
+    ) -> (Vec<HashMap<String, String>>, Vec<u8>) {
+        let stream_id = u64::from(recv.id());
+        let mut reader = FrameReader::new();
+        let mut sections = Vec::new();
+        let mut data = Vec::new();
+        while let Some(frame) = reader.next(&mut recv).await {
+            match frame {
+                Frame::Headers(block) => sections.push(field_map(self.decode(&block, stream_id))),
+                Frame::Data(chunk) => data.extend_from_slice(&chunk),
+                other => panic!("unexpected frame on request stream: {other:?}"),
+            }
+        }
+        (sections, data)
+    }
+
+    /// Reads a complete response, unblocking dynamic-table references.
+    async fn response_dynamic(
+        &mut self,
+        mut recv: quinn::RecvStream,
+    ) -> (Vec<HashMap<String, String>>, Vec<u8>) {
+        let stream_id = u64::from(recv.id());
+        let mut reader = FrameReader::new();
+        let mut sections = Vec::new();
+        let mut data = Vec::new();
+        while let Some(frame) = reader.next(&mut recv).await {
+            match frame {
+                Frame::Headers(block) => {
+                    sections.push(field_map(self.decode_dynamic(&block, stream_id).await))
+                }
+                Frame::Data(chunk) => data.extend_from_slice(&chunk),
+                other => panic!("unexpected frame on request stream: {other:?}"),
+            }
+        }
+        (sections, data)
+    }
+
     /// Writes one DATA frame.
     async fn write_data(send: &mut quinn::SendStream, data: &[u8]) {
         let mut buf = BytesMut::new();
@@ -249,8 +391,8 @@ impl Fixture {
         send.write_all(&buf).await.expect("write data");
     }
 
-    /// Decodes a response HEADERS block. The server is advertised a QPACK
-    /// table capacity of 0, so blocks decode statelessly.
+    /// Decodes a response HEADERS block. The server sees a table capacity of
+    /// zero, so blocks decode statelessly.
     fn decode(&mut self, block: &Bytes, stream_id: u64) -> Vec<(Bytes, Bytes)> {
         let now = self.started_at.elapsed().as_nanos() as u64;
         self.decoder
@@ -259,8 +401,7 @@ impl Fixture {
             .expect("blocked without a dynamic table")
     }
 
-    /// Accepts whatever unidirectional streams the server has opened so far
-    /// and routes them.
+    /// Accepts and routes the server's unidirectional streams.
     async fn pump_server_unis(&mut self) {
         loop {
             let accept =
@@ -274,10 +415,8 @@ impl Fixture {
             match type_byte[0] {
                 0x02 => self.server_encoder = Some(recv),
                 other => {
-                    // Control (0x00), decoder (0x03), push (0x01) or grease:
-                    // nothing to decode here. These streams stay open for
-                    // the connection's lifetime, so drain only what is
-                    // buffered right now (a short timeout), then drop.
+                    // Control, decoder, push, or grease: drain what the
+                    // server already buffered, then drop the stream.
                     let _ = other;
                     let mut buf = [0u8; 16 * 1024];
                     loop {
@@ -294,9 +433,8 @@ impl Fixture {
         }
     }
 
-    /// Reads one chunk of the server's QPACK encoder stream into the
-    /// decoder, which unblocks any field section whose Required Insert
-    /// Count has been reached. Returns the field sections that unblocked.
+    /// Reads the server's QPACK encoder stream and returns newly unblocked
+    /// field sections.
     async fn feed_server_encoder(&mut self) -> Vec<UnblockedSection> {
         let recv = match self.server_encoder.as_mut() {
             Some(recv) => recv,
@@ -315,9 +453,8 @@ impl Fixture {
         }
     }
 
-    /// Decodes a response HEADERS block against a dynamic-table-capable
-    /// decoder, pumping the server's encoder stream until the block
-    /// unblocks. This mirrors Chromium's blocked-decoding flow.
+    /// Decodes a response HEADERS block, pumping the server's encoder stream
+    /// until a blocked block unblocks.
     async fn decode_dynamic(&mut self, block: &[u8], stream_id: u64) -> Vec<(Bytes, Bytes)> {
         let now = self.started_at.elapsed().as_nanos() as u64;
         if let Some(headers) = self
@@ -325,14 +462,9 @@ impl Fixture {
             .decode_block(block, stream_id, now)
             .expect("decode response headers")
         {
-            // A real client acknowledges decoded field sections on its
-            // decoder stream, which lets the server's encoder evict and
-            // reuse dynamic-table entries (RFC 9204 Section 2.1.1).
             self.flush_acks().await;
             return headers;
         }
-        // The block was buffered as blocked, so pump the server's encoder
-        // stream.
         loop {
             if self.server_encoder.is_none() {
                 self.pump_server_unis().await;
@@ -348,8 +480,7 @@ impl Fixture {
         }
     }
 
-    /// Flushes any accumulated QPACK decoder-stream instructions (section
-    /// acknowledgements) to the server.
+    /// Sends queued QPACK section acknowledgements.
     async fn flush_acks(&mut self) {
         let ack = self.decoder.take_decoder_stream();
         if !ack.is_empty() {
@@ -387,25 +518,6 @@ impl FrameReader {
     }
 }
 
-/// Reads the whole response: all HEADERS sections (decoded) plus the DATA.
-async fn fixture_response(
-    fixture: &mut Fixture,
-    mut recv: quinn::RecvStream,
-) -> (Vec<HashMap<String, String>>, Vec<u8>) {
-    let stream_id = u64::from(recv.id());
-    let mut reader = FrameReader::new();
-    let mut sections = Vec::new();
-    let mut data = Vec::new();
-    while let Some(frame) = reader.next(&mut recv).await {
-        match frame {
-            Frame::Headers(block) => sections.push(field_map(fixture.decode(&block, stream_id))),
-            Frame::Data(chunk) => data.extend_from_slice(&chunk),
-            other => panic!("unexpected frame on request stream: {other:?}"),
-        }
-    }
-    (sections, data)
-}
-
 fn field_map(fields: Vec<(Bytes, Bytes)>) -> HashMap<String, String> {
     fields
         .into_iter()
@@ -432,72 +544,50 @@ fn pseudo(headers: &[(&str, &str)]) -> Vec<(Bytes, Bytes)> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h3_client_get_post_trailers_and_date() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) =
-            spawn_native_server(
-                server_conn,
-                Http3Options::new(),
-                cancel.clone(),
-                |request| async move {
-                    let (parts, body) = request.into_parts();
-
-                    let (bytes, trailers) = read_body_and_trailers(body).await;
-
-                    let trailer = trailers
-                        .as_ref()
-                        .and_then(|t| t.get("x-request-trailer"))
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("none");
-                    let payload = format!(
-                        "{} {} {} {}",
-                        parts.method,
-                        parts.uri.path(),
-                        bytes.len(),
-                        trailer
-                    );
-                    let mut response_trailers = HeaderMap::new();
-                    response_trailers
-                        .insert("x-response-trailer", HeaderValue::from_static("echoed"));
-                    let body = Full::new(Bytes::from(payload)).with_trailers(std::future::ready(
-                        Some(Ok::<HeaderMap, std::convert::Infallible>(response_trailers)),
-                    ));
-                    Ok::<_, std::convert::Infallible>(
-                        Response::builder()
-                            .status(StatusCode::OK)
-                            .body(body)
-                            .expect("response"),
-                    )
-                },
+        let server = NativeServer::start(server_conn, Http3Options::new(), |request| async move {
+            let (parts, body) = request.into_parts();
+            let (bytes, trailers) = read_body_and_trailers(body).await;
+            let trailer = trailers
+                .as_ref()
+                .and_then(|t| t.get("x-request-trailer"))
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("none");
+            let payload = format!(
+                "{} {} {} {}",
+                parts.method,
+                parts.uri.path(),
+                bytes.len(),
+                trailer
             );
-
-        let (mut conn, mut send_request) = h3::client::builder()
-            .build(h3_quinn::Connection::new(client_conn))
-            .await
-            .expect("h3 client");
-        let drive = tokio::spawn(async move {
-            let _ = conn.wait_idle().await;
-            std::future::pending::<()>().await;
+            let mut response_trailers = HeaderMap::new();
+            response_trailers.insert("x-response-trailer", HeaderValue::from_static("echoed"));
+            let body =
+                Full::new(Bytes::from(payload)).with_trailers(std::future::ready(Some(Ok::<
+                    HeaderMap,
+                    std::convert::Infallible,
+                >(
+                    response_trailers,
+                ))));
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(body)
+                    .expect("response"),
+            )
         });
 
-        let request = Request::get("https://localhost/echo").body(()).unwrap();
-        let mut stream = send_request.send_request(request).await.expect("GET");
+        let mut client = H3Client::connect(client_conn).await;
 
+        let mut stream = client.get("/echo").await;
         stream.finish().await.expect("finish GET");
         let response = stream.recv_response().await.expect("GET response");
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.version(), http::Version::HTTP_3);
-        assert!(
-            response.headers().contains_key(http::header::DATE),
-            "native server adds a Date header"
-        );
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.recv_data().await.expect("GET data") {
-            body.extend_from_slice(chunk.chunk());
-        }
-        assert_eq!(body, b"GET /echo 0 none");
+        assert!(response.headers().contains_key(http::header::DATE));
+        assert_eq!(read_response_body(&mut stream).await, b"GET /echo 0 none");
 
         assert_eq!(
             stream.recv_trailers().await.expect("GET trailers"),
@@ -512,14 +602,11 @@ async fn h3_client_get_post_trailers_and_date() {
         request
             .headers_mut()
             .insert("x-request-trailer", HeaderValue::from_static("yes"));
-
-        let mut stream = send_request.send_request(request).await.expect("POST");
-
+        let mut stream = client.request(request).await;
         stream
             .send_data(Bytes::from_static(b"hello "))
             .await
             .expect("POST data 1");
-
         stream
             .send_data(Bytes::from_static(b"world"))
             .await
@@ -528,7 +615,6 @@ async fn h3_client_get_post_trailers_and_date() {
         let mut trailers = HeaderMap::new();
         trailers.insert("x-request-trailer", HeaderValue::from_static("yes"));
         stream.send_trailers(trailers).await.expect("POST trailers");
-
         stream.finish().await.expect("POST finish");
 
         let response = stream.recv_response().await.expect("POST response");
@@ -540,11 +626,7 @@ async fn h3_client_get_post_trailers_and_date() {
                 .map(|v| v.to_str().unwrap()),
             Some("17")
         );
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.recv_data().await.expect("POST data") {
-            body.extend_from_slice(chunk.chunk());
-        }
-        assert_eq!(body, b"POST /post 11 yes");
+        assert_eq!(read_response_body(&mut stream).await, b"POST /post 11 yes");
         assert_eq!(
             stream.recv_trailers().await.expect("POST trailers"),
             Some({
@@ -555,57 +637,32 @@ async fn h3_client_get_post_trailers_and_date() {
         );
 
         drop(stream);
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        drive.abort();
-        drop(send_request);
-        server_thread.join().expect("join server");
+        client.shutdown();
+        server.shutdown();
     })
-    .await
-    .expect("h3_client_get_post_trailers_and_date timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h3_client_concurrent_streams_and_abort() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            |request| async move {
-                let (_, body) = request.into_parts();
-                let (bytes, _) = read_body_and_trailers(body).await;
-                let payload = format!("{}", bytes.len());
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .body(Full::new(Bytes::from(payload)))
-                        .expect("response"),
-                )
-            },
-        );
-
-        let (mut conn, mut send_request) = h3::client::builder()
-            .build(h3_quinn::Connection::new(client_conn))
-            .await
-            .expect("h3 client");
-        let drive = tokio::spawn(async move {
-            let _ = conn.wait_idle().await;
-            std::future::pending::<()>().await;
+        let server = NativeServer::start(server_conn, Http3Options::new(), |request| async move {
+            let (_, body) = request.into_parts();
+            let (bytes, _) = read_body_and_trailers(body).await;
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(Bytes::from(bytes.len().to_string())))
+                    .expect("response"),
+            )
         });
+
+        let mut client = H3Client::connect(client_conn).await;
 
         let mut streams = Vec::new();
         for i in 0..25usize {
-            let request = Request::post("https://localhost/echo").body(()).unwrap();
-            let mut stream = send_request
-                .send_request(request)
-                .await
-                .expect("send request");
+            let mut stream = client.post("/echo").await;
             stream
                 .send_data(Bytes::from(vec![b'x'; i * 100]))
                 .await
@@ -614,11 +671,7 @@ async fn h3_client_concurrent_streams_and_abort() {
             streams.push((i, stream));
         }
 
-        let request = Request::post("https://localhost/abort").body(()).unwrap();
-        let mut abort = send_request
-            .send_request(request)
-            .await
-            .expect("abort request");
+        let mut abort = client.post("/abort").await;
         abort
             .send_data(Bytes::from_static(b"partial body"))
             .await
@@ -629,116 +682,76 @@ async fn h3_client_concurrent_streams_and_abort() {
         for (i, mut stream) in streams {
             let response = stream.recv_response().await.expect("response");
             assert_eq!(response.status(), StatusCode::OK);
-            let mut body = Vec::new();
-            while let Some(chunk) = stream.recv_data().await.expect("data") {
-                body.extend_from_slice(chunk.chunk());
-            }
-            assert_eq!(body, format!("{}", i * 100).as_bytes());
+            assert_eq!(
+                read_response_body(&mut stream).await,
+                (i * 100).to_string().as_bytes()
+            );
         }
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        drive.abort();
-        drop(send_request);
-        server_thread.join().expect("join server");
+        client.shutdown();
+        server.shutdown();
     })
-    .await
-    .expect("h3_client_concurrent_streams_and_abort timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h3_client_goaway_graceful_shutdown() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
         let (start_tx, start_rx) = mpsc::channel::<()>();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            move |request| {
-                let start_tx = start_tx.clone();
-                async move {
-                    start_tx.send(()).ok();
-                    let (_, body) = request.into_parts();
-                    let (bytes, _) = read_body_and_trailers(body).await;
-                    let payload = format!("got {} bytes", bytes.len());
-                    Ok::<_, std::convert::Infallible>(
-                        Response::builder()
-                            .status(StatusCode::OK)
-                            .body(Full::new(Bytes::from(payload)))
-                            .expect("response"),
-                    )
-                }
-            },
-        );
-
-        let client_raw = client_conn.clone();
-        let (mut conn, mut send_request) = h3::client::builder()
-            .build(h3_quinn::Connection::new(client_conn))
-            .await
-            .expect("h3 client");
-        let drive = tokio::spawn(async move {
-            let _ = conn.wait_idle().await;
-            std::future::pending::<()>().await;
+        let server = NativeServer::start(server_conn, Http3Options::new(), move |request| {
+            let start_tx = start_tx.clone();
+            async move {
+                start_tx.send(()).ok();
+                let (_, body) = request.into_parts();
+                let (bytes, _) = read_body_and_trailers(body).await;
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from(format!("got {} bytes", bytes.len()))))
+                        .expect("response"),
+                )
+            }
         });
 
-        let request = Request::post("https://localhost/slow").body(()).unwrap();
-        let mut a: h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes> =
-            send_request.send_request(request).await.expect("request A");
-        a.send_data(Bytes::from_static(b"first chunk"))
+        let client_raw = client_conn.clone();
+        let mut client = H3Client::connect(client_conn).await;
+
+        let mut stream: H3RequestStream = client.post("/slow").await;
+        stream
+            .send_data(Bytes::from_static(b"first chunk"))
             .await
             .expect("A data");
         start_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("handler started");
 
-        cancel.cancel();
-        a.send_data(Bytes::from_static(b"rest chunk"))
+        server.cancel();
+        stream
+            .send_data(Bytes::from_static(b"rest chunk"))
             .await
             .expect("A rest data");
-        a.finish().await.expect("finish A");
+        stream.finish().await.expect("finish A");
 
-        let response = a.recv_response().await.expect("A response");
+        let response = stream.recv_response().await.expect("A response");
         assert_eq!(response.status(), StatusCode::OK);
-        let mut body = Vec::new();
-        while let Some(chunk) = a.recv_data().await.expect("A data") {
-            body.extend_from_slice(chunk.chunk());
-        }
-        assert_eq!(body, b"got 21 bytes");
-        let closed = client_raw.closed().await;
-        match closed {
-            quinn::ConnectionError::ApplicationClosed(close) => {
-                assert_eq!(close.error_code.into_inner(), H3_NO_ERROR);
-            }
-            other => panic!("unexpected close: {other:?}"),
-        }
+        assert_eq!(read_response_body(&mut stream).await, b"got 21 bytes");
+        expect_app_close(&client_raw, H3_NO_ERROR).await;
 
-        drop(a);
-        drive.abort();
-        drop(send_request);
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        drop(stream);
+        client.shutdown();
+        server.finish();
     })
-    .await
-    .expect("h3_client_goaway_graceful_shutdown timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h3_client_idle_connection_closes_after_accept_timeout() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
+        let server = NativeServer::start(
             server_conn,
             Http3Options::new().accept_timeout(Some(Duration::from_millis(300))),
-            cancel.clone(),
             |_request| async move {
                 Ok::<_, std::convert::Infallible>(
                     Response::builder()
@@ -750,64 +763,41 @@ async fn h3_client_idle_connection_closes_after_accept_timeout() {
         );
 
         let client_raw = client_conn.clone();
-        let (mut conn, mut send_request) = h3::client::builder()
-            .build(h3_quinn::Connection::new(client_conn))
-            .await
-            .expect("h3 client");
-        let drive = tokio::spawn(async move {
-            let _ = conn.wait_idle().await;
-            std::future::pending::<()>().await;
-        });
+        let mut client = H3Client::connect(client_conn).await;
 
-        let request = Request::get("https://localhost/").body(()).unwrap();
-        let mut stream: h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes> =
-            send_request.send_request(request).await.expect("request");
+        let mut stream = client.get("/").await;
         stream.finish().await.expect("finish");
         let response = stream.recv_response().await.expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         while stream.recv_data().await.expect("data").is_some() {}
         drop(stream);
 
-        // The client keeps the connection open and idle; the server must close it.
-        let closed = tokio::time::timeout(Duration::from_secs(5), client_raw.closed())
-            .await
-            .expect("the server closes the idle connection");
-        match closed {
-            quinn::ConnectionError::ApplicationClosed(close) => {
-                assert_eq!(close.error_code.into_inner(), H3_NO_ERROR);
-            }
-            other => panic!("unexpected close: {other:?}"),
-        }
-        let result = server_result
-            .recv_timeout(Duration::from_secs(5))
-            .expect("handle returns after the accept timeout");
-        let error = result.expect_err("an accept timeout is reported");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            expect_app_close(&client_raw, H3_NO_ERROR),
+        )
+        .await
+        .expect("the server closes the idle connection");
+
+        let error = server.finish_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
 
-        drive.abort();
-        drop(send_request);
-        server_thread.join().expect("join server");
+        client.shutdown();
     })
-    .await
-    .expect("h3_client_idle_connection_closes_after_accept_timeout timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h3_accept_timeout_ignores_in_flight_requests() {
-    // The accept timeout bounds an idle connection's wait for its next request.
-    // A request that takes longer than the timeout must not start the graceful
-    // shutdown: the next request on the same connection is still served.
-    tokio::time::timeout(Duration::from_secs(30), async {
+    // The accept timeout only applies while no request is in flight.
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
+        let server = NativeServer::start(
             server_conn,
             Http3Options::new().accept_timeout(Some(Duration::from_millis(300))),
-            cancel.clone(),
             |request| async move {
                 if request.uri().path() == "/slow" {
-                    // Longer than the accept timeout. A thread does the waiting, so
-                    // the handler's future stays `Send`.
+                    // Wait on a thread so the handler future stays `Send`.
                     let (done, wait) = tokio::sync::oneshot::channel();
                     std::thread::spawn(move || {
                         std::thread::sleep(Duration::from_secs(1));
@@ -824,77 +814,44 @@ async fn h3_accept_timeout_ignores_in_flight_requests() {
             },
         );
 
-        let (mut conn, mut send_request) = h3::client::builder()
-            .build(h3_quinn::Connection::new(client_conn))
-            .await
-            .expect("h3 client");
-        let drive = tokio::spawn(async move {
-            let _ = conn.wait_idle().await;
-            std::future::pending::<()>().await;
-        });
+        let mut client = H3Client::connect(client_conn).await;
 
         for path in ["/slow", "/after"] {
-            let request = Request::get(format!("https://localhost{path}"))
-                .body(())
-                .unwrap();
-            let mut stream: h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes> =
-                send_request.send_request(request).await.expect(path);
+            let mut stream = client.get(path).await;
             stream.finish().await.expect("finish");
             let response = stream.recv_response().await.expect("response");
             assert_eq!(response.status(), StatusCode::OK, "{path}");
-            let mut body = Vec::new();
-            while let Some(chunk) = stream.recv_data().await.expect("data") {
-                body.extend_from_slice(chunk.chunk());
-            }
-            assert_eq!(body, b"done", "{path}");
+            assert_eq!(read_response_body(&mut stream).await, b"done", "{path}");
         }
 
-        cancel.cancel();
-        drive.abort();
-        drop(send_request);
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        client.shutdown();
+        server.shutdown();
     })
-    .await
-    .expect("h3_accept_timeout_ignores_in_flight_requests timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_wire_get() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            |request| async move {
-                let (parts, _) = request.into_parts();
-                let payload = format!("wire-ok {}", parts.uri.path());
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .body(Full::new(Bytes::from(payload)))
-                        .expect("response"),
-                )
-            },
-        );
+        let server = NativeServer::start(server_conn, Http3Options::new(), |request| async move {
+            let (parts, _) = request.into_parts();
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(Bytes::from(format!(
+                        "wire-ok {}",
+                        parts.uri.path()
+                    ))))
+                    .expect("response"),
+            )
+        });
 
         let mut fixture = Fixture::new(client_conn).await;
-        let (mut send, recv) = fixture
-            .request_open(&pseudo(&[
-                (":method", "GET"),
-                (":scheme", "https"),
-                (":authority", "localhost"),
-                (":path", "/wire"),
-            ]))
-            .await;
+        let (mut send, recv) = fixture.request_get("/wire").await;
         send.finish().expect("finish request");
 
-        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        let (sections, data) = fixture.response(recv).await;
         assert_eq!(sections.len(), 1, "no interim responses for a plain GET");
         let headers = &sections[0];
         assert_eq!(headers.get(":status").map(String::as_str), Some("200"));
@@ -902,69 +859,25 @@ async fn fixture_client_wire_get() {
             headers.get("content-length").map(String::as_str),
             Some("13")
         );
-        assert!(headers.contains_key("date"), "native server adds Date");
+        assert!(headers.contains_key("date"));
         assert_eq!(data, b"wire-ok /wire");
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        server.shutdown();
     })
-    .await
-    .expect("fixture_client_wire_get timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_dynamic_table_unblocks() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            |request| async move {
-                let (parts, _) = request.into_parts();
-                let payload = format!("dyn-ok {}", parts.uri.path());
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        // It would be a dynamic table entry
-                        .header("x-dyn-token", "rendered-dynamically")
-                        .body(Full::new(Bytes::from(payload)))
-                        .expect("response"),
-                )
-            },
-        );
+        let server = NativeServer::start(server_conn, Http3Options::new(), dyn_handler);
 
-        // Chromium advertises 65536 / 100; the fixture's decoder is sized
-        // the same way so it can materialize the server's dynamic entries.
         let mut fixture = Fixture::new_with_capacity(client_conn, 65_536, 100).await;
-        let (mut send, mut recv) = fixture
-            .request_open(&pseudo(&[
-                (":method", "GET"),
-                (":scheme", "https"),
-                (":authority", "localhost"),
-                (":path", "/dyn"),
-            ]))
-            .await;
+        let (mut send, recv) = fixture.request_get("/dyn").await;
         send.finish().expect("finish request");
 
-        let stream_id = u64::from(recv.id());
-        let mut reader = FrameReader::new();
-        let mut sections = Vec::new();
-        let mut data = Vec::new();
-        while let Some(frame) = reader.next(&mut recv).await {
-            match frame {
-                Frame::Headers(block) => {
-                    sections.push(field_map(fixture.decode_dynamic(&block, stream_id).await))
-                }
-                Frame::Data(chunk) => data.extend_from_slice(&chunk),
-                other => panic!("unexpected frame on request stream: {other:?}"),
-            }
-        }
+        let (sections, data) = fixture.response_dynamic(recv).await;
         assert_eq!(sections.len(), 1, "no interim responses for a plain GET");
         let headers = &sections[0];
         assert_eq!(headers.get(":status").map(String::as_str), Some("200"));
@@ -974,44 +887,17 @@ async fn fixture_client_dynamic_table_unblocks() {
         );
         assert_eq!(data, b"dyn-ok /dyn");
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        server.shutdown();
     })
-    .await
-    .expect("fixture_client_dynamic_table_unblocks timed out");
+    .await;
 }
 
-/// One GET against a dynamic-table-capable fixture: the response headers
-/// carry the non-static `x-dyn-token` name, so every response forces the
-/// server's encoder to emit inserts.
+/// One GET against a dynamic-table fixture, returning the response body.
 async fn dyn_exchange(fixture: &mut Fixture, path: &str, expect_token: &str) -> Vec<u8> {
-    let (mut send, mut recv) = fixture
-        .request_open(&pseudo(&[
-            (":method", "GET"),
-            (":scheme", "https"),
-            (":authority", "localhost"),
-            (":path", path),
-        ]))
-        .await;
+    let (mut send, recv) = fixture.request_get(path).await;
     send.finish().expect("finish request");
 
-    let stream_id = u64::from(recv.id());
-    let mut reader = FrameReader::new();
-    let mut sections = Vec::new();
-    let mut data = Vec::new();
-    while let Some(frame) = reader.next(&mut recv).await {
-        match frame {
-            Frame::Headers(block) => {
-                sections.push(field_map(fixture.decode_dynamic(&block, stream_id).await))
-            }
-            Frame::Data(chunk) => data.extend_from_slice(&chunk),
-            other => panic!("unexpected frame on request stream: {other:?}"),
-        }
-    }
+    let (sections, data) = fixture.response_dynamic(recv).await;
     let headers = &sections[0];
     assert_eq!(headers.get(":status").map(String::as_str), Some("200"));
     assert_eq!(
@@ -1021,104 +907,70 @@ async fn dyn_exchange(fixture: &mut Fixture, path: &str, expect_token: &str) -> 
     data
 }
 
-/// A request handler echoing the path, with the dynamic-table-forcing
-/// `x-dyn-token` response header.
+/// A handler that forces a dynamic-table insert via `x-dyn-token`.
 async fn dyn_handler(
     request: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let (parts, _) = request.into_parts();
-    let payload = format!("dyn-ok {}", parts.uri.path());
     Ok::<_, std::convert::Infallible>(
         Response::builder()
             .status(StatusCode::OK)
             .header("x-dyn-token", "rendered-dynamically")
-            .body(Full::new(Bytes::from(payload)))
+            .body(Full::new(Bytes::from(format!(
+                "dyn-ok {}",
+                parts.uri.path()
+            ))))
             .expect("response"),
     )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_dynamic_table_reload_and_reconnect() {
-    tokio::time::timeout(Duration::from_secs(60), async {
-        // Connection 1: the "reload" pattern
+    with_timeout_secs(60, async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            dyn_handler,
-        );
+        let server = NativeServer::start(server_conn, Http3Options::new(), dyn_handler);
         let mut fixture = Fixture::new_with_capacity(client_conn, 65_536, 100).await;
-        assert_eq!(
-            dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
-            b"dyn-ok /page"
-        );
-        assert_eq!(
-            dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
-            b"dyn-ok /page"
-        );
 
-        // Shut down gracefully while the peer is still present, and drop the
-        // client only afterwards, to not suddenly tear down QUIC.
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server 1 finished");
-        assert!(result.is_ok(), "server 1 handle: {result:?}");
-        server_thread.join().expect("join server 1");
+        for _ in 0..2 {
+            assert_eq!(
+                dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
+                b"dyn-ok /page"
+            );
+        }
+
+        // Keep the peer alive until the server has shut down.
+        server.shutdown();
         drop(fixture);
 
-        // Connection 2: the browser closed and reopened, so the fresh
-        // connection must serve the dynamic-table response on its first
-        // request.
+        // A fresh connection must still serve the dynamic-table response.
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            dyn_handler,
-        );
+        let server = NativeServer::start(server_conn, Http3Options::new(), dyn_handler);
         let mut fixture = Fixture::new_with_capacity(client_conn, 65_536, 100).await;
         assert_eq!(
             dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
             b"dyn-ok /page"
         );
-        // Same teardown ordering as before...
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server 2 finished");
-        assert!(result.is_ok(), "server 2 handle: {result:?}");
-        server_thread.join().expect("join server 2");
+
+        server.shutdown();
         drop(fixture);
     })
-    .await
-    .expect("fixture_client_dynamic_table_reload_and_reconnect timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_expect_100_continue() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            |request| async move {
-                let (_, body) = request.into_parts();
-                let (bytes, _) = read_body_and_trailers(body).await;
-                let payload = format!("got {} bytes", bytes.len());
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .body(Full::new(Bytes::from(payload)))
-                        .expect("response"),
-                )
-            },
-        );
+        let server = NativeServer::start(server_conn, Http3Options::new(), |request| async move {
+            let (_, body) = request.into_parts();
+            let (bytes, _) = read_body_and_trailers(body).await;
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(Bytes::from(format!("got {} bytes", bytes.len()))))
+                    .expect("response"),
+            )
+        });
 
         let mut fixture = Fixture::new(client_conn).await;
         let (mut send, mut recv) = fixture
@@ -1138,44 +990,31 @@ async fn fixture_client_expect_100_continue() {
             panic!("first frame is not HEADERS: {first:?}");
         };
         let interim = fixture.decode(&block, stream_id);
-        assert_eq!(
-            interim
-                .iter()
-                .find(|(name, _)| name.as_ref() == b":status")
-                .map(|(_, value)| value.as_ref()),
-            Some(b"100".as_slice()),
-            "server sends 100 Continue before the body is sent"
-        );
+        let status = interim
+            .iter()
+            .find(|(name, _)| name.as_ref() == b":status")
+            .map(|(_, value)| value.as_ref());
+        assert_eq!(status, Some(b"100".as_slice()));
 
         Fixture::write_data(&mut send, b"continue-body").await;
         send.finish().expect("finish request");
 
-        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        let (sections, data) = fixture.response(recv).await;
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
         assert_eq!(data, b"got 13 bytes");
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        server.shutdown();
     })
-    .await
-    .expect("fixture_client_expect_100_continue timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_early_hints() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            |mut request| async move {
+        let server =
+            NativeServer::start(server_conn, Http3Options::new(), |mut request| async move {
                 let mut link = HeaderMap::new();
                 link.insert(
                     http::header::LINK,
@@ -1190,21 +1029,13 @@ async fn fixture_client_early_hints() {
                         .body(Full::new(Bytes::from_static(b"done")))
                         .expect("response"),
                 )
-            },
-        );
+            });
 
         let mut fixture = Fixture::new(client_conn).await;
-        let (mut send, recv) = fixture
-            .request_open(&pseudo(&[
-                (":method", "GET"),
-                (":scheme", "https"),
-                (":authority", "localhost"),
-                (":path", "/hints"),
-            ]))
-            .await;
+        let (mut send, recv) = fixture.request_get("/hints").await;
         send.finish().expect("finish request");
 
-        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        let (sections, data) = fixture.response(recv).await;
         assert_eq!(sections.len(), 2, "103 Early Hints then the final response");
         assert_eq!(sections[0].get(":status").map(String::as_str), Some("103"));
         assert_eq!(
@@ -1214,33 +1045,27 @@ async fn fixture_client_early_hints() {
         assert_eq!(sections[1].get(":status").map(String::as_str), Some("200"));
         assert_eq!(data, b"done");
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        server.shutdown();
     })
-    .await
-    .expect("fixture_client_early_hints timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_connect() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
+        let server = NativeServer::start(
             server_conn,
             Http3Options::new().enable_connect_protocol(true),
-            cancel.clone(),
             |request| async move {
                 let (parts, _) = request.into_parts();
-                let payload = format!("connect={}", parts.method == Method::CONNECT);
                 Ok::<_, std::convert::Infallible>(
                     Response::builder()
                         .status(StatusCode::OK)
-                        .body(Full::new(Bytes::from(payload)))
+                        .body(Full::new(Bytes::from(format!(
+                            "connect={}",
+                            parts.method == Method::CONNECT
+                        ))))
                         .expect("response"),
                 )
             },
@@ -1255,20 +1080,14 @@ async fn fixture_client_connect() {
             .await;
         send.finish().expect("finish request");
 
-        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        let (sections, data) = fixture.response(recv).await;
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
         assert_eq!(data, b"connect=true");
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        server.shutdown();
     })
-    .await
-    .expect("fixture_client_connect timed out");
+    .await;
 }
 
 /// Like [`dyn_handler`], but the `x-dyn-token` value is derived from the
@@ -1293,96 +1112,55 @@ async fn dyn_handler_unique(
 /// dynamic table.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_dynamic_table_eviction_pressure() {
-    tokio::time::timeout(Duration::from_secs(60), async {
+    with_timeout_secs(60, async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            dyn_handler_unique,
-        );
+        let server = NativeServer::start(server_conn, Http3Options::new(), dyn_handler_unique);
 
         // A small capacity forces eviction after a handful of inserts.
         let mut fixture = Fixture::new_with_capacity(client_conn, 600, 100).await;
-        let count = 200;
-        for i in 0..count {
+        for i in 0..200 {
             let path = format!("/p{i}");
-            let (mut send, mut recv) = fixture
-                .request_open(&pseudo(&[
-                    (":method", "GET"),
-                    (":scheme", "https"),
-                    (":authority", "localhost"),
-                    (":path", &path),
-                ]))
-                .await;
+            let (mut send, recv) = fixture.request_get(&path).await;
             send.finish().expect("finish request");
-            let stream_id = u64::from(recv.id());
-            let mut reader = FrameReader::new();
-            let mut token = String::new();
-            let mut data = Vec::new();
-            while let Some(frame) = reader.next(&mut recv).await {
-                match frame {
-                    Frame::Headers(block) => {
-                        let headers = field_map(fixture.decode_dynamic(&block, stream_id).await);
-                        assert_eq!(
-                            headers.get(":status").map(String::as_str),
-                            Some("200"),
-                            "request {i} headers"
-                        );
-                        token = headers
-                            .get("x-dyn-token")
-                            .cloned()
-                            .expect("x-dyn-token present");
-                    }
-                    Frame::Data(chunk) => data.extend_from_slice(&chunk),
-                    other => panic!("unexpected frame on request stream: {other:?}"),
-                }
-            }
+
+            let (sections, data) = fixture.response_dynamic(recv).await;
+            let headers = &sections[0];
             assert_eq!(
-                token,
-                format!("token-{path}"),
+                headers.get(":status").map(String::as_str),
+                Some("200"),
+                "request {i} headers"
+            );
+            assert_eq!(
+                headers.get("x-dyn-token").map(String::as_str),
+                Some(format!("token-{path}").as_str()),
                 "request {i} token matches path"
             );
             assert_eq!(data, format!("dyn-ok {path}").into_bytes());
         }
 
-        // Same teardown ordering: graceful shutdown while the peer is present,
-        // drop the client only after the server has exited.
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        // Keep the peer alive until the server has shut down.
+        server.shutdown();
         drop(fixture);
     })
-    .await
-    .expect("fixture_client_dynamic_table_eviction_fix timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_malformed_message_resets_stream_and_connection_survives() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            |request| async move {
-                let (_parts, _) = request.into_parts();
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .body(Full::new(Bytes::from(b"still-alive".to_vec())))
-                        .expect("response"),
-                )
-            },
-        );
+        let server = NativeServer::start(server_conn, Http3Options::new(), |request| async move {
+            let (_parts, _) = request.into_parts();
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(Bytes::from_static(b"still-alive")))
+                    .expect("response"),
+            )
+        });
 
         let mut fixture = Fixture::new(client_conn).await;
-        // A request without `:method` is a malformed message...
+        // A request without `:method` is malformed.
         let (mut send, mut recv) = fixture
             .request_open(&pseudo(&[
                 (":scheme", "https"),
@@ -1400,56 +1178,35 @@ async fn fixture_client_malformed_message_resets_stream_and_connection_survives(
         assert_eq!(reset_code, 0x010e, "H3_MESSAGE_ERROR expected");
         assert_eq!(stream_id, u64::from(recv.id()));
 
-        // The connection survived the malformed stream: a valid request
-        // on another stream is served normally.
-        let (mut send, recv) = fixture
-            .request_open(&pseudo(&[
-                (":method", "GET"),
-                (":scheme", "https"),
-                (":authority", "localhost"),
-                (":path", "/ok"),
-            ]))
-            .await;
+        // The malformed stream did not take the connection down.
+        let (mut send, recv) = fixture.request_get("/ok").await;
         send.finish().expect("finish request");
-        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        let (sections, data) = fixture.response(recv).await;
         assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
         assert_eq!(data, b"still-alive");
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        server.shutdown();
     })
-    .await
-    .expect("fixture_client_malformed_message_resets_stream_and_connection_survives timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_connection_specific_fields_reset_the_stream() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            |request| async move {
-                let (_parts, _) = request.into_parts();
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .body(Full::new(Bytes::from(b"still-alive".to_vec())))
-                        .expect("response"),
-                )
-            },
-        );
+        let server = NativeServer::start(server_conn, Http3Options::new(), |request| async move {
+            let (_parts, _) = request.into_parts();
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(Bytes::from_static(b"still-alive")))
+                    .expect("response"),
+            )
+        });
 
         let mut fixture = Fixture::new(client_conn).await;
 
-        // Connection-specific fields make a request malformed (RFC 9114
-        // Section 4.2)
+        // Connection-specific fields make a request malformed (RFC 9114 4.2).
         for (name, value) in [
             ("connection", "close"),
             ("keep-alive", "timeout=5"),
@@ -1491,44 +1248,35 @@ async fn fixture_client_connection_specific_fields_reset_the_stream() {
             ]))
             .await;
         send.finish().expect("finish request");
-        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        let (sections, data) = fixture.response(recv).await;
         assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
         assert_eq!(data, b"still-alive");
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        server.shutdown();
     })
-    .await
-    .expect("fixture_client_connection_specific_fields_reset_the_stream timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_local_error_reset_budget_closes_with_excessive_load() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
+        let server = NativeServer::start(
             server_conn,
             Http3Options::new().max_local_error_reset_streams(Some(2)),
-            cancel.clone(),
             |request| async move {
                 let (_parts, _) = request.into_parts();
                 Ok::<_, std::convert::Infallible>(
                     Response::builder()
                         .status(StatusCode::OK)
-                        .body(Full::new(Bytes::from(b"unused".to_vec())))
+                        .body(Full::new(Bytes::from_static(b"unused")))
                         .expect("response"),
                 )
             },
         );
 
         let mut fixture = Fixture::new(client_conn.clone()).await;
-        // Two malformed messages fit the local-reset budget, but the third
-        // costs the connection
+        // Two malformed messages fit the local-reset budget; the third does not.
         for i in 0..3 {
             let (mut send, _recv) = fixture
                 .request_open(&pseudo(&[
@@ -1539,83 +1287,58 @@ async fn fixture_client_local_error_reset_budget_closes_with_excessive_load() {
                 .await;
             let _ = send.finish();
         }
-        let closed = client_conn.closed().await;
-        match closed {
-            quinn::ConnectionError::ApplicationClosed(close) => {
-                assert_eq!(close.error_code.into_inner(), 0x0107, "H3_EXCESSIVE_LOAD");
-            }
-            other => panic!("expected application close with H3_EXCESSIVE_LOAD, got {other:?}"),
-        }
+        expect_app_close(&client_conn, 0x0107).await;
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        let err = result.expect_err("expected ExcessiveLoad connection error");
-        let msg = err.to_string();
+        server.cancel();
+        let error = server.finish_err();
+        let message = error.to_string();
         assert!(
-            msg.contains("ExcessiveLoad") && msg.contains("0x107"),
-            "unexpected server error: {msg}"
+            message.contains("ExcessiveLoad") && message.contains("0x107"),
+            "unexpected server error: {message}"
         );
-        server_thread.join().expect("join server");
     })
-    .await
-    .expect("fixture_client_local_error_reset_budget_closes_with_excessive_load timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_pending_accept_reset_budget_closes_with_excessive_load() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
+        let server = NativeServer::start(
             server_conn,
             Http3Options::new().max_pending_accept_reset_streams(Some(2)),
-            cancel.clone(),
             |request| async move {
                 let (_parts, _) = request.into_parts();
                 Ok::<_, std::convert::Infallible>(
                     Response::builder()
                         .status(StatusCode::OK)
-                        .body(Full::new(Bytes::from(b"unused".to_vec())))
+                        .body(Full::new(Bytes::from_static(b"unused")))
                         .expect("response"),
                 )
             },
         );
 
         let fixture = Fixture::new(client_conn.clone()).await;
-        // Streams opened and terminated before any request bytes were
-        // sent never reach the handler
+        // Streams that end before sending request bytes never reach the handler.
         for _ in 0..3 {
             let (mut send, _recv) = fixture.conn.open_bi().await.expect("open request stream");
             let _ = send.reset(0x010cu32.into()); // H3_REQUEST_CANCELLED
         }
-        let closed = client_conn.closed().await;
-        match closed {
-            quinn::ConnectionError::ApplicationClosed(close) => {
-                assert_eq!(close.error_code.into_inner(), 0x0107, "H3_EXCESSIVE_LOAD");
-            }
-            other => panic!("expected application close with H3_EXCESSIVE_LOAD, got {other:?}"),
-        }
+        expect_app_close(&client_conn, 0x0107).await;
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        let err = result.expect_err("expected ExcessiveLoad connection error");
-        let msg = err.to_string();
+        server.cancel();
+        let error = server.finish_err();
+        let message = error.to_string();
         assert!(
-            msg.contains("ExcessiveLoad") && msg.contains("0x107"),
-            "unexpected server error: {msg}"
+            message.contains("ExcessiveLoad") && message.contains("0x107"),
+            "unexpected server error: {message}"
         );
-        server_thread.join().expect("join server");
     })
-    .await
-    .expect("fixture_client_pending_accept_reset_budget_closes_with_excessive_load timed out");
+    .await;
 }
 
 /// A body that yields its frames in turn; the last may be an error.
-struct Frames(std::collections::VecDeque<Result<http_body::Frame<Bytes>, std::io::Error>>);
+struct Frames(VecDeque<Result<http_body::Frame<Bytes>, std::io::Error>>);
 
 impl http_body::Body for Frames {
     type Data = Bytes;
@@ -1644,42 +1367,27 @@ async fn reset_code(mut recv: quinn::RecvStream) -> Option<u64> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_response_cut_short_is_reset_not_finished() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            |request| async move {
-                let frames = match request.uri().path() {
-                    "/fail" => return Err(std::io::Error::other("the handler failed")),
-                    "/broken" => vec![
-                        Ok(http_body::Frame::data(Bytes::from_static(b"part"))),
-                        Err(std::io::Error::other("the body broke")),
-                    ],
-                    _ => vec![Ok(http_body::Frame::data(Bytes::from_static(b"whole")))],
-                };
-                Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Frames(frames.into()))
-                    .expect("response"))
-            },
-        );
+        let server = NativeServer::start(server_conn, Http3Options::new(), |request| async move {
+            let frames = match request.uri().path() {
+                "/fail" => return Err(std::io::Error::other("the handler failed")),
+                "/broken" => vec![
+                    Ok(http_body::Frame::data(Bytes::from_static(b"part"))),
+                    Err(std::io::Error::other("the body broke")),
+                ],
+                _ => vec![Ok(http_body::Frame::data(Bytes::from_static(b"whole")))],
+            };
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .body(Frames(frames.into()))
+                .expect("response"))
+        });
 
         let mut fixture = Fixture::new(client_conn).await;
-        // A handler that fails, and a body that fails halfway (an upstream
-        // that went away mid-download), are cut short: the client must see a
-        // reset, not a finished stream it would take for the whole response.
+        // A failed handler or body must reset the stream rather than finish it.
         for path in ["/fail", "/broken"] {
-            let (mut send, recv) = fixture
-                .request_open(&pseudo(&[
-                    (":method", "GET"),
-                    (":scheme", "https"),
-                    (":authority", "localhost"),
-                    (":path", path),
-                ]))
-                .await;
+            let (mut send, recv) = fixture.request_get(path).await;
             send.finish().expect("finish request");
             assert_eq!(
                 reset_code(recv).await,
@@ -1688,52 +1396,32 @@ async fn fixture_client_response_cut_short_is_reset_not_finished() {
             );
         }
 
-        let (mut send, recv) = fixture
-            .request_open(&pseudo(&[
-                (":method", "GET"),
-                (":scheme", "https"),
-                (":authority", "localhost"),
-                (":path", "/ok"),
-            ]))
-            .await;
+        let (mut send, recv) = fixture.request_get("/ok").await;
         send.finish().expect("finish request");
-        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        let (sections, data) = fixture.response(recv).await;
         assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
         assert_eq!(data, b"whole");
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        server.shutdown();
     })
-    .await
-    .expect("fixture_client_response_cut_short_is_reset_not_finished timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_uppercase_field_name_is_malformed() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
-            server_conn,
-            Http3Options::new(),
-            cancel.clone(),
-            |_request| async move {
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .body(Full::new(Bytes::from_static(b"served")))
-                        .expect("response"),
-                )
-            },
-        );
+        let server = NativeServer::start(server_conn, Http3Options::new(), |_request| async move {
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(Bytes::from_static(b"served")))
+                    .expect("response"),
+            )
+        });
 
         let mut fixture = Fixture::new(client_conn).await;
-        // An uppercase field name makes the message malformed (RFC 9114
-        // Section 4.2); `HeaderName` would accept and lowercase it.
+        // `HeaderName` would accept and lowercase this.
         let (mut send, recv) = fixture
             .request_open(&pseudo(&[
                 (":method", "GET"),
@@ -1744,73 +1432,49 @@ async fn fixture_client_uppercase_field_name_is_malformed() {
             ]))
             .await;
         let _ = send.finish();
-        assert_eq!(
-            reset_code(recv).await,
-            Some(0x010e),
-            "H3_MESSAGE_ERROR expected"
-        );
+        assert_eq!(reset_code(recv).await, Some(0x010e));
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        server.shutdown();
     })
-    .await
-    .expect("fixture_client_uppercase_field_name_is_malformed timed out");
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_pending_accept_resets_over_time_keep_the_connection() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    with_timeout(async {
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
-        let cancel = CancellationToken::new();
-        let (server_thread, server_result) = spawn_native_server(
+        let server = NativeServer::start(
             server_conn,
             Http3Options::new().max_pending_accept_reset_streams(Some(2)),
-            cancel.clone(),
             |request| async move {
                 let (parts, _) = request.into_parts();
-                let payload = format!("still-open {}", parts.uri.path());
                 Ok::<_, std::convert::Infallible>(
                     Response::builder()
                         .status(StatusCode::OK)
-                        .body(Full::new(Bytes::from(payload)))
+                        .body(Full::new(Bytes::from(format!(
+                            "still-open {}",
+                            parts.uri.path()
+                        ))))
                         .expect("response"),
                 )
             },
         );
 
-        let mut fixture = Fixture::new(client_conn.clone()).await;
-        // Ten cancelled streams over a second, as a client cancels requests
-        // over a connection's life: more than the budget of 2 in all, but
-        // never more than 2 at once, so the connection stays open.
+        let mut fixture = Fixture::new(client_conn).await;
+        // More than the budget in total, but never more than two at once.
         for _ in 0..10 {
             let (mut send, _recv) = fixture.conn.open_bi().await.expect("open request stream");
             let _ = send.reset(0x010cu32.into()); // H3_REQUEST_CANCELLED
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let (mut send, recv) = fixture
-            .request_open(&pseudo(&[
-                (":method", "GET"),
-                (":scheme", "https"),
-                (":authority", "localhost"),
-                (":path", "/after"),
-            ]))
-            .await;
+
+        let (mut send, recv) = fixture.request_get("/after").await;
         send.finish().expect("finish request");
-        let (sections, data) = fixture_response(&mut fixture, recv).await;
+        let (sections, data) = fixture.response(recv).await;
         assert_eq!(sections[0].get(":status").map(String::as_str), Some("200"));
         assert_eq!(data, b"still-open /after");
 
-        cancel.cancel();
-        let result = server_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("server finished");
-        assert!(result.is_ok(), "server handle: {result:?}");
-        server_thread.join().expect("join server");
+        server.shutdown();
     })
-    .await
-    .expect("fixture_client_pending_accept_resets_over_time_keep_the_connection timed out");
+    .await;
 }

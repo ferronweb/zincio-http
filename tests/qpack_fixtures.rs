@@ -1,15 +1,13 @@
 //! QPACK fixture corpus: parsing and checks.
 //!
-//! Story files live in `tests/fixtures/qpack/stories/`, see its
-//! `README.md` for more information.
+//! Story files live in `tests/fixtures/qpack/stories/`; see its `README.md`.
 
 #![cfg(all(feature = "h3", feature = "unstable-internals"))]
 
-use std::{
-    collections::VecDeque,
-    fs,
-    path::{Path, PathBuf},
-};
+#[path = "common/fixtures.rs"]
+mod fixtures;
+
+use std::{collections::VecDeque, fs, path::Path};
 
 use bytes::Bytes;
 use serde_json::Value;
@@ -21,8 +19,8 @@ const STORIES_DIR: &str = "tests/fixtures/qpack/stories";
 pub(crate) struct Story {
     pub(crate) table_capacity: u64,
     pub(crate) max_blocked_streams: usize,
-    /// Deliver every field section before any encoder stream bytes (the
-    /// `nghttp3/` stories set this to exercise blocked streams).
+    /// Deliver every field section before any encoder stream bytes. The
+    /// `nghttp3/` stories use this to exercise blocked streams.
     pub(crate) delay_encoder_stream: bool,
     pub(crate) cases: Vec<Case>,
 }
@@ -31,28 +29,8 @@ pub(crate) struct Story {
 pub(crate) struct Case {
     pub(crate) stream_id: u64,
     pub(crate) wire: Vec<u8>,
-    /// Expected header list for field-section records; encoder records
-    /// carry no headers.
+    /// Expected headers for field-section records; encoder records have none.
     pub(crate) headers: Option<Vec<(Vec<u8>, Vec<u8>)>>,
-}
-
-/// All story files in the corpus, sorted for deterministic ordering.
-pub(crate) fn story_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for dir in fs::read_dir(STORIES_DIR).unwrap() {
-        let dir = dir.unwrap();
-        if !dir.path().is_dir() {
-            continue;
-        }
-        for file in fs::read_dir(dir.path()).unwrap() {
-            let file = file.unwrap();
-            if file.path().extension().is_some_and(|e| e == "json") {
-                paths.push(file.path());
-            }
-        }
-    }
-    paths.sort();
-    paths
 }
 
 /// Parses a story file into ordered records.
@@ -101,7 +79,7 @@ pub(crate) fn parse_story(path: &Path) -> Story {
 
         parsed.push(Case {
             stream_id,
-            wire: parse_hex(wire_hex),
+            wire: fixtures::parse_hex(wire_hex),
             headers,
         });
     }
@@ -122,31 +100,11 @@ fn to_bytes(s: &str) -> Vec<u8> {
     s.chars().map(|c| c as u8).collect()
 }
 
-fn parse_hex(hex: &str) -> Vec<u8> {
-    assert!(
-        hex.len().is_multiple_of(2),
-        "wire hex string has even length"
-    );
-    hex.as_bytes()
-        .as_chunks::<2>()
-        .0
+fn expected_bytes(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Bytes, Bytes)> {
+    headers
         .iter()
-        .map(|pair| {
-            let hi = hexval(pair[0]);
-            let lo = hexval(pair[1]);
-            (hi << 4) | lo
-        })
+        .map(|(name, value)| (Bytes::copy_from_slice(name), Bytes::copy_from_slice(value)))
         .collect()
-}
-
-#[inline]
-fn hexval(b: u8) -> u8 {
-    match b {
-        b'0'..=b'9' => b - b'0',
-        b'a'..=b'f' => b - b'a' + 10,
-        b'A'..=b'F' => b - b'A' + 10,
-        _ => panic!("invalid hex digit {b:#x}"),
-    }
 }
 
 /// Replays a story against a decoder, in record order.
@@ -177,15 +135,11 @@ fn replay_decode(path: &Path, story: &Story) {
             .unwrap_or_else(|e| panic!("stream {}: decode error: {e:?}", case.stream_id))
         {
             Some(headers) => {
-                let expected: Vec<(Bytes, Bytes)> = case
-                    .headers
-                    .as_ref()
-                    .expect("decoded section has expected headers")
-                    .iter()
-                    .map(|(name, value)| {
-                        (Bytes::copy_from_slice(name), Bytes::copy_from_slice(value))
-                    })
-                    .collect();
+                let expected = expected_bytes(
+                    case.headers
+                        .as_ref()
+                        .expect("decoded section has expected headers"),
+                );
                 assert_headers(&headers, &expected);
             }
             None => parked.push_back(Case {
@@ -233,12 +187,11 @@ fn feed_encoder(
             "unblocked section on stream {} does not match parked stream {}",
             section.stream_id, parked_case.stream_id
         );
-        let expected: Vec<(Bytes, Bytes)> = parked_case
-            .headers
-            .expect("parked section has expected headers")
-            .iter()
-            .map(|(name, value)| (Bytes::copy_from_slice(name), Bytes::copy_from_slice(value)))
-            .collect();
+        let expected = expected_bytes(
+            &parked_case
+                .headers
+                .expect("parked section has expected headers"),
+        );
         assert_headers(&section.headers, &expected);
     }
 }
@@ -274,10 +227,7 @@ fn replay_encode(story: &Story) {
         let Some(headers) = &case.headers else {
             continue;
         };
-        let headers: Vec<(Bytes, Bytes)> = headers
-            .iter()
-            .map(|(name, value)| (Bytes::copy_from_slice(name), Bytes::copy_from_slice(value)))
-            .collect();
+        let headers = expected_bytes(headers);
         let encoded = encoder.encode_section(0, &headers);
         for section in decoder
             .feed_encoder_stream(&encoded.encoder_stream)
@@ -299,7 +249,7 @@ fn replay_encode(story: &Story) {
 
 #[test]
 fn corpus_parses() {
-    let paths = story_paths();
+    let paths = fixtures::story_paths(STORIES_DIR);
     assert!(!paths.is_empty(), "no story files found");
     for path in &paths {
         let story = parse_story(path);
@@ -313,7 +263,7 @@ fn corpus_parses() {
 
 #[test]
 fn corpus_decodes() {
-    for path in story_paths() {
+    for path in fixtures::story_paths(STORIES_DIR) {
         replay_decode(&path, &parse_story(&path));
     }
 }
@@ -323,7 +273,7 @@ fn corpus_blocks_some_sections() {
     // The `delay_encoder_stream` stories deliver every field section before
     // any encoder stream bytes, so every dynamic reference must block first.
     let mut blocked_any = false;
-    for path in story_paths() {
+    for path in fixtures::story_paths(STORIES_DIR) {
         let story = parse_story(&path);
         if !story.delay_encoder_stream {
             continue;
@@ -350,7 +300,7 @@ fn corpus_blocks_some_sections() {
 
 #[test]
 fn corpus_encodes_round_trips() {
-    for path in story_paths() {
+    for path in fixtures::story_paths(STORIES_DIR) {
         replay_encode(&parse_story(&path));
     }
 }

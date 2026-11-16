@@ -290,9 +290,10 @@ where
                 }
             }
         }
+        // Answered with 431, as a head with too many fields (`handle_with_error_fn`).
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "request too large",
+            "request head too large",
         ))
     }
 

@@ -1,30 +1,13 @@
 #!/usr/bin/env bash
 #
-# h3spec conformance harness for the native HTTP/3 backend.
+# h3spec conformance test script for the native HTTP/3 backend.
 #
 # Builds and starts `examples/h3spec_server.rs`, waits until it binds UDP on
 # 127.0.0.1:4433, runs h3spec (with `-n` to tolerate the self-signed
 # certificate), and propagates h3spec's exit code so CI can gate on it.
 #
-# Known-failing cases are skipped via `-s` so the run is green. Each entry is
-# annotated below: most are genuine RFC 9114 / QPACK conformance gaps in the
-# native HTTP/3 layer, but a couple are external races (quinn / h3spec packet
-# fragmentation) that are not fixable without forking quinn. They are easy to
-# find and re-enable as the implementation (or the TLS stack) is hardened.
-#
-# Verified 2026-10-06 against h3spec 0.1.13: 49 cases total, 46 run green,
-# 2 skipped below, 1 self-skipped by h3spec (0-RTT, which needs a session the
-# harness does not establish). Without skips the TLS missing_extension case
-# fails deterministically (quinn limitation) while the QPACK Insert Count
-# case flakes with packetization timing.
-#
 # Env overrides: H3SPEC_HOST, H3SPEC_PORT, H3SPEC_BIN (path to a prebuilt
 # server binary), H3SPEC_TIMEOUT (per-case timeout in ms, default 2000).
-#
-# Prerequisites: python3 (UDP readiness probe), and the h3spec binary at
-# ./h3spec/h3spec -- download it from
-# https://github.com/kazu-yamamoto/h3spec/releases (H3SPEC_VERSION in
-# .github/workflows/h3spec.yml pins the version CI uses).
 
 set -u
 set -o pipefail
@@ -35,7 +18,7 @@ TIMEOUT="${H3SPEC_TIMEOUT:-2000}"
 BIN="${H3SPEC_BIN:-target/debug/examples/h3spec_server}"
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$here"
+cd "$here" || exit 1
 
 if [ ! -x "$BIN" ]; then
     echo "==> building h3spec_server example"
@@ -46,19 +29,22 @@ fi
 # a substring of the h3spec test-case description.
 KNOWN_FAILING=(
     # TLS/transport-layer: quinn/rustls does not emit a missing_extension
-    # alert when the ClientHello omits quic_transport_parameters. This is a
-    # limitation of the TLS stack, not the native HTTP/3 implementation.
+    # alert when the ClientHello omits quic_transport_parameters.
+    #
+    # This is a limitation of quinn or rustls, not zincio-http.
     "QUIC servers MUST send missing_extension TLS alert if the quic_transport_parameters extension"
 
-    # QPACK 4.4.3 (Insert Count Increment 0): the native layer correctly
+    # QPACK 4.4.3 (Insert Count Increment 0): the HTTP/3 server correctly
     # detects the error and closes with H3_QPACK_DECODER_STREAM_ERROR (0x0202)
-    # -- verified by the unit test in control.rs. However, h3spec fragments
-    # the decoder stream into two STREAM frames (the 0x03 type byte FINned,
-    # then 0x00 at offset 1). quinn then raises FINAL_SIZE_ERROR at the QUIC
-    # layer, which preempts the application 0x0202 close. Whether quinn wins
-    # the race is pure packetization timing, so the case is flaky; skip it
-    # rather than let a quinn/h3spec interaction fail CI. Re-enable if quinn
-    # is bumped to finalize streams without the spurious FINAL_SIZE_ERROR.
+    # , verified by the unit test in control.rs.
+    #
+    # However, h3spec fragments the decoder stream into two STREAM frames
+    # (the 0x03 type byte FINned, then 0x00 at offset 1). quinn then raises
+    # FINAL_SIZE_ERROR at the QUIC layer, before the application 0x0202 close.
+    #
+    # Whether quinn wins the race is pure packetization timing, so the case is flaky,
+    # so skip it for now. Re-enable if quinn is bumped to finalize streams without
+    # the spurious FINAL_SIZE_ERROR.
     "Insert Count Increment is 0"
 )
 
@@ -71,6 +57,7 @@ echo "==> starting h3spec_server on ${HOST}:${PORT}"
 "$BIN" &
 SERVER_PID=$!
 
+# shellcheck disable=SC2329
 cleanup() {
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true

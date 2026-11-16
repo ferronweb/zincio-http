@@ -246,7 +246,7 @@ impl Endpoint {
                 | Http3ClientEvent::GoawayReceived
                 | Http3ClientEvent::ResumptionToken(_)
                 | Http3ClientEvent::ZeroRttRejected
-                | Http3ClientEvent::OutgoingDatagramSpaceAvailable
+                | Http3ClientEvent::OutgoingDatagramSpaceAvailable { .. }
                 | Http3ClientEvent::EchFallbackAuthenticationNeeded { .. }
                 | Http3ClientEvent::WebTransport(_)
                 | Http3ClientEvent::ConnectUdp(_) => {}

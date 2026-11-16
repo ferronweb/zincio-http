@@ -423,7 +423,11 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
         let mut guard = stream.lock().await;
         let poll_headers = std::future::poll_fn(|cx| guard.poll_headers(cx));
         if let Some(timeout) = header_timeout {
-            match zincio::time::timeout(timeout, poll_headers).await {
+            // Awaited apart from the `match`: in its scrutinee the timeout future, which
+            // borrows `guard`, would live through the arms, and locking the stream again
+            // there waits on this guard forever.
+            let read = zincio::time::timeout(timeout, poll_headers).await;
+            match read {
                 Ok(result) => result,
                 Err(_) => {
                     report(
@@ -431,7 +435,6 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                         stream_id,
                         format_args!("stream header read timeout"),
                     );
-                    let mut guard = stream.lock().await;
                     let code = H3Error::RequestCancelled.code();
                     let _ = std::future::poll_fn(|cx| guard.poll_reset(cx, code)).await;
                     let _ = std::future::poll_fn(|cx| guard.poll_stop_sending(cx, code)).await;

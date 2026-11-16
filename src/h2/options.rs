@@ -6,8 +6,8 @@ use crate::h2::codec::{
 
 /// HTTP/2 server configuration.
 ///
-/// Build one with [`Http2Options::default`] and override individual fields
-/// with the builder methods, then hand it to [`Http2::new`](crate::Http2::new).
+/// Build with [`Http2Options::default`] and override fields with the builder
+/// methods.
 #[derive(Debug, Clone)]
 pub struct Http2Options {
     /// Max time to wait for the client's preface before giving up.
@@ -47,10 +47,27 @@ pub struct Http2Options {
     pub(crate) max_continuation_frames: Option<usize>,
 }
 
-impl Default for Http2Options {
-    #[inline]
-    fn default() -> Self {
-        Http2Options {
+impl Http2Options {
+    /// Creates options with the defaults shown below.
+    ///
+    /// | Option | Default |
+    /// |---|---|
+    /// | handshake_timeout | 10 seconds |
+    /// | header_read_timeout | 10 seconds |
+    /// | send_continue_response | `true` |
+    /// | send_date_header | `true` |
+    /// | max_concurrent_streams | 200 |
+    /// | initial_stream_window_size | `1048576` |
+    /// | initial_connection_window_size | `65535` |
+    /// | max_frame_size | `16384` |
+    /// | max_header_list_size | `16384` |
+    /// | enable_connect_protocol | `false` |
+    /// | idle_timeout | none |
+    /// | max_local_error_reset_streams | 1,024 |
+    /// | max_pending_accept_reset_streams | 20 |
+    /// | max_continuation_frames | calculated safe default |
+    pub fn new() -> Self {
+        Self {
             handshake_timeout: Some(Duration::from_secs(10)),
             header_read_timeout: Some(Duration::from_secs(30)),
             send_continue_response: true,
@@ -67,9 +84,7 @@ impl Default for Http2Options {
             max_continuation_frames: None,
         }
     }
-}
 
-impl Http2Options {
     /// Sets the maximum time to wait for a client to send the HTTP/2
     /// preface before aborting the connection.
     #[inline]
@@ -157,65 +172,46 @@ impl Http2Options {
         self
     }
 
-    /// Sets the idle timeout: a connection that receives no frame from the
-    /// peer for this long is closed gracefully with a `GOAWAY` (RFC 9113
-    /// Section 10.5). Defaults to `None` (no idle timeout).
+    /// Sets the idle timeout: a connection that receives no frame for this
+    /// long is closed gracefully with a GOAWAY. `None` disables it.
     #[inline]
     pub fn idle_timeout(mut self, idle_timeout: Option<Duration>) -> Self {
         self.idle_timeout = idle_timeout;
         self
     }
 
-    /// Sets the maximum number of RST_STREAM frames this endpoint sends in
-    /// response to protocol errors made by the peer across the lifetime of
-    /// the connection.
-    ///
-    /// When the peer keeps producing protocol errors past this many local
-    /// resets, the connection is closed with a GOAWAY of type
-    /// `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
-    ///
-    /// `None` disables the limit. Defaults to `Some(1024)`.
+    /// Sets the budget for resets sent in response to peer protocol errors.
+    /// Exceeding it closes with GOAWAY `ENHANCE_YOUR_CALM` (RFC 9113 Section
+    /// 10.5.2). Defaults to 1024.
     #[inline]
     pub fn max_local_error_reset_streams(mut self, max: Option<usize>) -> Self {
         self.max_local_error_reset_streams = max;
         self
     }
 
-    /// Sets the maximum number of streams the peer reset before this endpoint
-    /// produced a final response for them that may be counted at a time.
-    ///
-    /// When the peer keeps opening and resetting streams faster than they are
-    /// responded to, the connection is closed with a GOAWAY of type
-    /// `ENHANCE_YOUR_CALM` (RFC 9113 Section 10.5.2).
-    ///
-    /// The budget refills at 50 streams a second, so cancelled requests
-    /// spread over a connection's life never use it up.
-    ///
-    /// `None` disables the limit. Defaults to `Some(20)`.
+    /// Sets how many peer-reset streams may be counted before a final
+    /// response. The budget refills at 50 per second (RFC 9113 Section
+    /// 10.5.2). Defaults to 20.
     #[inline]
     pub fn max_pending_accept_reset_streams(mut self, max: Option<usize>) -> Self {
         self.max_pending_accept_reset_streams = max;
         self
     }
 
-    /// Sets the maximum number of frames that may compose a single header
-    /// field block that has not yet been terminated by END_HEADERS.
-    ///
-    /// A field block is opened by a HEADERS (or PUSH_PROMISE) frame without
-    /// END_HEADERS and continued by CONTINUATION frames. When a peer keeps
-    /// one open past this many frames, it is a CONTINUATION flood and the
-    /// stream is reset with `RST_STREAM` `PROTOCOL_ERROR`.
-    ///
-    /// `None` (the default) computes a safe bound automatically: the
-    /// configured `max_header_list_size` divided by `max_frame_size`,
-    /// plus a ~20% packing buffer and a fixed slack of 10 frames. This is
-    /// enough for any correctly-packed header block while catching floods
-    /// that never close the block.
-    ///
-    /// Defaults to `None`.
+    /// Sets the maximum frames in one header block before it is treated as a
+    /// CONTINUATION flood. `None` computes a safe bound from the other
+    /// limits (the configured `max_header_list_size` divided by `max_frame_size`,
+    /// plus a ~20% packing buffer and a fixed slack of 10 frames).
     #[inline]
     pub fn max_continuation_frames(mut self, max: Option<usize>) -> Self {
         self.max_continuation_frames = max;
         self
+    }
+}
+
+impl Default for Http2Options {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
     }
 }

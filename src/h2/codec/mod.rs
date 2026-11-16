@@ -1,15 +1,9 @@
 //! HTTP/2 frame codec (RFC 9113 Section 6).
 //!
-//! Parses and writes the 9-octet frame header and every frame type:
-//! DATA, HEADERS, PRIORITY, RST_STREAM, SETTINGS, PUSH_PROMISE, PING,
-//! GOAWAY, WINDOW_UPDATE and CONTINUATION, including PADDED and
-//! PRIORITY flags. Validation covers frame-size limits, stream-id rules,
-//! settings values and field-block continuation discipline. Unknown
-//! frame types are ignored (RFC 9113 Section 4.1).
-//!
-//! The decoder is incremental: feed it bytes with [`FrameDecoder::extend`]
-//! and call [`FrameDecoder::next_frame`]; it returns `Ok(None)` until a
-//! complete frame is buffered.
+//! Parses and writes every frame type, including padding and priority fields.
+//! The decoder is incremental: feed bytes with [`FrameDecoder::extend`] and
+//! pull frames with [`FrameDecoder::next_frame`]; `Ok(None)` means more input
+//! is needed.
 
 use super::error::{H2Error, Reason};
 use bytes::{Bytes, BytesMut};
@@ -22,10 +16,8 @@ pub const DEFAULT_MAX_FRAME_SIZE: usize = 16_384;
 pub const MAX_FRAME_SIZE_LIMIT: usize = 16_777_215;
 /// The initial connection flow-control window (RFC 9113 Section 6.9.1).
 pub const DEFAULT_CONNECTION_WINDOW_SIZE: u32 = 65_535;
-/// The initial per-stream flow-control window this server advertises via
-/// SETTINGS (RFC 9113 Section 6.5.2). The protocol default is 65535, but
-/// advertising a larger window (1MiB) reduces round-trips for large
-/// responses.
+/// The initial per-stream window advertised via SETTINGS. The larger default
+/// reduces round-trips for large responses.
 pub const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 1_048_576;
 /// The largest legal flow-control window (2^31-1).
 pub const MAX_WINDOW_SIZE: u32 = 2_147_483_647;
@@ -65,9 +57,7 @@ pub struct Setting {
     pub value: u32,
 }
 
-/// A parsed frame. Payloads are zero-copy views over the decoder's
-/// buffer (kept alive by `Bytes` refcounting until the frame is
-/// dropped).
+/// A parsed frame. Payloads are zero-copy views over the decoder's buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     Data {
@@ -439,11 +429,7 @@ fn payload_slice(payload: &Bytes, body: &[u8], pad_len: usize) -> Bytes {
     payload.slice(start..start + body.len())
 }
 
-/// Reads the pad-length octet when `padded` is set and strips that many
-/// trailing octets from `body`, returning the padding length.
-///
-/// The padding must be strictly shorter than the payload (RFC 9113
-/// Section 6.1).
+/// Reads and validates the pad-length octet when `padded` is set.
 #[inline]
 fn take_padding(body: &mut &[u8], padded: bool) -> Result<usize, H2Error> {
     if !padded {
@@ -499,9 +485,7 @@ fn require_stream(stream_id: u32) -> Result<(), H2Error> {
     }
 }
 
-/// Validates the value of a known SETTINGS parameter (RFC 9113
-/// Section 6.5.2). Unknown identifiers are accepted and ignored by the
-/// caller.
+/// Validates a known SETTINGS parameter (RFC 9113 Section 6.5.2).
 #[inline]
 fn validate_setting(id: u16, value: u32) -> Result<(), H2Error> {
     match id {

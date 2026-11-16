@@ -1,8 +1,6 @@
 //! HPACK decoder (RFC 7541 Section 6).
 //!
-//! Decodes a complete header block (HEADERS plus any CONTINUATION frames,
-//! already assembled by the caller) into a header list, maintaining the
-//! dynamic table across blocks.
+//! Decodes complete header blocks and mirrors the peer's dynamic table.
 
 use super::{
     integer, string,

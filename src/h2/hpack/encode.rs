@@ -1,9 +1,7 @@
 //! HPACK encoder (RFC 7541 Section 6).
 //!
-//! Encodes a header list into a single header block, maintaining the
-//! dynamic table across blocks. The encoder's table mirrors the peer's
-//! decoder table: it honors the peer's `SETTINGS_HEADER_TABLE_SIZE` via
-//! [`Encoder::queue_size_update`].
+//! Encodes headers into blocks and mirrors the peer's dynamic table,
+//! honoring `SETTINGS_HEADER_TABLE_SIZE`.
 
 use super::{
     integer, string,
@@ -70,13 +68,11 @@ impl Encoder {
         &self.table
     }
 
-    /// Encodes `headers` as a single header block appended to `out`.
+    /// Encodes `headers` as a header block appended to `out`.
     ///
-    /// - Non-sensitive headers are encoded with incremental indexing
-    ///   (RFC 7541 Section 6.2.1) and added to the dynamic table.
-    /// - Exact matches use the indexed representation (Section 6.1).
-    /// - Sensitive headers ([`NEVER_INDEXED`]) are encoded
-    ///   never-indexed (Section 6.2.3) and never added to the table.
+    /// Exact matches use indexed representation, other non-sensitive fields
+    /// use incremental indexing, and sensitive fields are never indexed
+    /// (RFC 7541 Sections 6.1-6.2.3).
     #[inline]
     pub fn encode(&mut self, headers: &[Header], out: &mut Vec<u8>) {
         if let Some(size) = self.queued_size_update.take() {

@@ -1,10 +1,8 @@
-//! HTTP/2 stream layer (RFC 9113 Sections 5 and 8): one task per
-//! stream, message-passing with the connection task over bounded
-//! channels.
+//! HTTP/2 stream layer (RFC 9113 Sections 5 and 8).
 //!
-//! Flow control lives on the connection side: this module queues
-//! DATA via `StreamEntry::pending_data` and the connection drains it
-//! under the flow-control windows.
+//! One task per stream communicates with the connection over bounded
+//! channels; outbound DATA is queued in `StreamEntry::pending_data` and
+//! drained under the flow-control windows.
 
 use std::{
     collections::VecDeque,
@@ -103,10 +101,8 @@ pub(crate) struct StreamEntry {
     pub(crate) data_sum: u64,
     /// A trailer section was already received (only one is allowed).
     pub(crate) trailers_seen: bool,
-    /// The stream task has finished and its message channel is now empty.
-    ///
-    /// The stream itself lives on until `local_ended` so any flow-controlled
-    /// `pending_data` can still be drained by WINDOW_UPDATE.
+    /// The stream task finished; the stream remains until `local_ended` so
+    /// queued DATA can drain.
     pub(crate) task_done: bool,
     /// Server-side flow-control window for this stream (RFC 9113
     /// Section 6.9): DATA payloads we may still send.
@@ -173,10 +169,8 @@ impl StreamEntry {
         std::mem::take(&mut self.field_block)
     }
 
-    /// Forwards a request body message to the task.
-    ///
-    /// Return `Ok(false)` when the task has gone away or when there
-    /// is no body channel (for example, the request ended with HEADERS).
+    /// Forwards a request body message. Returns `false` when the task is
+    /// gone or the request has no body channel.
     #[inline]
     pub(crate) async fn send_body(&mut self, msg: BodyMsg) -> bool {
         match &self.body_tx {

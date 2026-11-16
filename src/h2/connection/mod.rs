@@ -1,12 +1,8 @@
 //! HTTP/2 connection (RFC 9113 Sections 3.5, 5.1, 6.5, 8.1).
 //!
-//! Drives one HTTP/2 connection over an async I/O stream: reads the
-//! client's 24-octet preface (with a timeout), sends the server
-//! SETTINGS, maintains the peer's SETTINGS state (applying
-//! `SETTINGS_HEADER_TABLE_SIZE` to the HPACK encoder and
-//! `SETTINGS_MAX_FRAME_SIZE` to the outgoing frame writer), answers
-//! SETTINGS frames with ACK, echoes PING, and reports protocol
-//! violations with GOAWAY before closing.\
+//! Drives one HTTP/2 connection: reads the preface, negotiates SETTINGS,
+//! handles PING and flow control, and reports protocol violations with
+//! GOAWAY.
 
 use std::{
     collections::VecDeque,
@@ -96,9 +92,7 @@ impl Default for ConnectionOptions {
     }
 }
 
-/// The peer's current SETTINGS values. Defaults are the RFC 9113
-/// Section 6.5.2 initial values; they change as non-ACK SETTINGS frames
-/// arrive.
+/// The peer's current SETTINGS values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerSettings {
     pub(crate) header_table_size: u32,
@@ -180,51 +174,38 @@ impl futures_util::future::FusedFuture for HeaderTimeoutFut {
 
 /// An HTTP/2 server connection.
 ///
-/// `Io` must be a raw transport: the preface is read byte-exact, so
-/// any buffering layer between the socket and this type breaks the
-/// initial read.
+/// `Io` must be the raw transport; any buffering layer would break the
+/// byte-exact preface read.
 pub struct Connection<Io> {
     io: Io,
     decoder: FrameDecoder,
     writer: FrameWriter,
     out: Vec<u8>,
-    /// Encoder for the field blocks this connection sends; its table
-    /// size follows the peer's `SETTINGS_HEADER_TABLE_SIZE`.
+    /// Encoder for this connection's field blocks.
     encoder: Encoder,
-    /// Decoder for the peer's field blocks; sees every header block on
-    /// this connection (RFC 9113 Section 4.3).
+    /// Decoder for the peer's field blocks (RFC 9113 Section 4.3).
     request_decoder: HpackDecoder,
-    /// The peer's settings, updated by non-ACK SETTINGS frames.
+    /// The peer's settings.
     peer: PeerSettings,
-    /// Bounds the wait for the client's 24-octet preface. A peer that
-    /// is too slow is disconnected without a GOAWAY.
+    /// Bounds the wait for the client preface.
     preface_timeout: Option<Duration>,
-    /// Active streams, keyed by stream id (RFC 9113 Section 5.1).
+    /// Active streams by id (RFC 9113 Section 5.1).
     streams: FxHashMap<u32, StreamEntry>,
-    /// Connection-level send window for DATA payloads (RFC 9113
-    /// Section 6.9.1); initial 65,535 octets.
+    /// Connection-level DATA send window (RFC 9113 Section 6.9.1).
     conn_window: i64,
-    /// Stream ids whose streams have ended (closed state per RFC 9113
-    /// Section 5.1); used to tell closed-stream frames apart from
-    /// idle-stream frames.
+    /// Stream ids whose streams have ended.
     closed_streams: FxHashSet<u32>,
-    /// LRU order for `closed_streams` to avoid bulk clear at 4096.
+    /// LRU order for `closed_streams`.
     closed_order: VecDeque<u32>,
-    /// Behavior options for this connection (used by [`Connection::handle`]).
+    /// Behavior options (used by [`Connection::handle`]).
     opts: ConnectionOptions,
-    /// Maximum time to wait for a stream's header block to complete
-    /// (END_HEADERS seen) before resetting it with `RequestTimeout`.
-    /// `None` disables the timeout.
+    /// Time allowed for a stream's header block to complete.
     header_read_timeout: Option<std::time::Duration>,
-    /// RST_STREAM frames this endpoint has sent in response to the
-    /// peer's protocol errors (bounded by `opts.max_local_error_reset_streams`).
+    /// Protocol-error resets this endpoint has sent.
     local_error_resets: usize,
-    /// Streams the peer reset before this endpoint produced a final
-    /// response for them (bounded by
-    /// `opts.max_pending_accept_reset_streams`).
+    /// Peer-reset streams counted against the rapid-reset budget.
     pending_accept_resets: f64,
-    /// When updated pending accept, used for token-bucket drain for
-    /// peer reset check.
+    /// When the rapid-reset budget was last drained.
     pending_accept_since: std::time::Instant,
     /// Wakes the drive loop when a stream task fills its outbound
     /// channel; the loop drains channels between reads.
@@ -318,10 +299,8 @@ where
         }
     }
 
-    /// Arms a [`CancellationToken`] that triggers a graceful shutdown
-    /// when cancelled: the connection sends GOAWAY, stops opening new
-    /// streams, drains in-flight responses, then closes (RFC 9113
-    /// Section 6.8).
+    /// Arms a [`CancellationToken`] that triggers a graceful shutdown:
+    /// GOAWAY, then drain in-flight streams (RFC 9113 Section 6.8).
     #[inline]
     pub fn with_shutdown(mut self, token: CancellationToken) -> Self {
         self.shutdown = Some(token);
@@ -559,11 +538,8 @@ where
         .await;
     }
 
-    /// Reads the 24-octet client preface.
-    ///
-    /// Returns `Ok(None)` on timeout, `Ok(Some(true))` on a match,
-    /// and `Ok(Some(false))` when the peer sent something else
-    /// (the caller then answers with GOAWAY).
+    /// Reads the 24-octet client preface. `None` means timeout; `false`
+    /// means invalid preface.
     #[inline]
     async fn read_preface(&mut self) -> std::io::Result<Option<bool>> {
         let mut magic = [0u8; CLIENT_PREFACE.len()];

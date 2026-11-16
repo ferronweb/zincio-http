@@ -202,10 +202,7 @@ const STATIC_TABLE: [(&[u8], &[u8]); 61] = [
 /// Number of entries in the static table.
 pub(crate) const STATIC_LEN: usize = 61;
 
-/// Below this many dynamic entries, `find`/`find_name` use a linear scan
-/// (cheap early exits for common headers)
-///
-/// Tiny tables favor the scan, while large tables favor the hash map.
+/// Table size below which lookups use a linear scan.
 const HYBRID_THRESHOLD: usize = 32;
 
 /// The entry-size overhead (RFC 7541 Section 4.1).

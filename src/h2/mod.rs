@@ -99,11 +99,8 @@ impl<Io> Http2<Io>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
 {
-    /// Creates a new `Http2` connection handler wrapping the given I/O stream.
-    ///
-    /// The `options` value controls HTTP/2 protocol configuration, handshake
-    /// and accept timeouts, and optional behaviour such as automatic
-    /// `100 Continue` responses; see [`Http2Options`] for details.
+    /// Creates a new `Http2` connection handler wrapping the given I/O
+    /// stream. See [`Http2Options`] for configuration.
     ///
     /// # Example
     ///
@@ -120,23 +117,16 @@ where
         }
     }
 
-    /// Attaches a [`CancellationToken`] for graceful shutdown.
-    ///
-    /// When the token is cancelled, the handler sends HTTP/2 graceful shutdown
-    /// signals (GOAWAY), stops accepting new streams, and exits cleanly.
+    /// Attaches a [`CancellationToken`] for graceful shutdown. Cancelling it
+    /// sends GOAWAY, stops accepting new streams, and drains in-flight ones.
     #[inline]
     pub fn graceful_shutdown_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
         self
     }
 
-    /// Attaches a stream error callback invoked with a [`std::io::Error`]
-    /// whenever an HTTP/2 stream fails (for example a malformed request,
-    /// a flow-control violation, or a reset).
-    ///
-    /// Connection-level failures continue to surface as the `Err` return
-    /// value of [`HttpProtocol::handle`]; this callback only observes
-    /// per-stream failures so they can be logged.
+    /// Attaches a callback invoked whenever an HTTP/2 stream fails.
+    /// Connection-level failures still surface as the handler's `Err`.
     #[inline]
     pub fn stream_error_callback<F>(mut self, callback: F) -> Self
     where

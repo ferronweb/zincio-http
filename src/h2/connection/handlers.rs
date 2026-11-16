@@ -147,10 +147,7 @@ where
         entry.send_window = self.peer.initial_window_size as i64;
         entry.msg_tx = Some(msg_tx);
         entry.reset_rx = Some(reset_rx);
-        // The request body channel only exists while body frames may
-        // still arrive. A request that ended with HEADERS (typical GET)
-        // gets `Incoming::Empty` in `spawn_request`, so skip the channel
-        // entirely instead of allocating it just to signal EOF through it.
+        // A request that ended with HEADERS has no body channel.
         if !end_stream {
             let (body_tx, body_rx) = kanal::bounded_async(8);
             entry.body_tx = Some(body_tx);
@@ -257,10 +254,8 @@ where
                 }
             };
         if end_stream {
-            // No DATA frame will follow: close the request body now so the
-            // handler's body reader sees end-of-stream (RFC 9113 Section
-            // 8.1). A trailing DATA frame ending the stream is handled by
-            // `handle_data_frame`.
+            // Close the body now; a DATA frame ending the stream is handled
+            // by `handle_data_frame`.
             self.end_request_body(stream_id).await;
         }
         self.spawn_request(stream_id, end_stream, parsed, request_fn);
@@ -381,10 +376,8 @@ where
         ));
     }
 
-    /// Remembers a stream id whose stream has ended for good, so
-    /// frames for it can be told apart from idle-stream frames
-    /// (RFC 9113 Section 5.1). Bounded to 4096 via LRU eviction to
-    /// avoid bulk-clear tail spike at the boundary.
+    /// Remembers a closed stream so its frames are not treated as idle
+    /// (RFC 9113 Section 5.1). Bounded to 4096 entries via LRU eviction.
     #[inline]
     pub(crate) fn mark_closed(&mut self, stream_id: u32) {
         if self.closed_streams.len() >= 4096 {
@@ -609,11 +602,7 @@ where
         raised
     }
 
-    /// Queues a GOAWAY frame; the connection closes after it flushes.
-    ///
-    /// Records a clear connection-level [`std::io::Error`] (the first one
-    /// wins) so [`Connection::handle`](super::Connection::handle) returns
-    /// `Err` instead of silently closing.
+    /// Queues a GOAWAY and records the connection error (first one wins).
     #[inline]
     pub(crate) fn goaway(&mut self, reason: Reason, debug: &[u8]) {
         if self.connection_error.is_none() {
@@ -628,10 +617,8 @@ where
             .write_goaway(&mut self.out, self.highest_stream_id, reason.code(), debug);
     }
 
-    /// Begins a graceful shutdown (RFC 9113 Section 6.8): advertises the
-    /// last stream id we will process and stops accepting new streams.
-    /// The drain phase (finish_graceful_shutdown) closes the connection
-    /// once in-flight streams finish or the drain window elapses.
+    /// Begins a graceful shutdown (RFC 9113 Section 6.8): sends GOAWAY and
+    /// stops accepting streams while in-flight streams drain.
     #[inline]
     pub(crate) fn begin_graceful_shutdown(&mut self) {
         if self.graceful || self.closing {
@@ -665,17 +652,12 @@ where
         );
     }
 
-    /// Queues a RST_STREAM for a stream error and forgets the stream.
-    /// The task is severed by dropping the entry's channels, so it
-    /// ends on its next poll.
+    /// Queues a RST_STREAM and drops the stream entry.
     #[inline]
     pub(crate) fn stream_error(&mut self, stream_id: u32, reason: Reason) {
         self.report_stream_error(stream_id, format!("{reason:?} ({:#x})", reason.code()));
-        // Bound the RST_STREAM frames we send for the peer's protocol
-        // errors (RFC 9113 Section 10.5.2): a peer that keeps making
-        // errors past the limit costs the connection, not the stream.
-        // InternalError is our own give-up (a stalled stream), not a
-        // peer error, so it does not count.
+        // Bound resets for peer protocol errors (RFC 9113 Section 10.5.2);
+        // our own stalled-stream resets do not count.
         if reason != Reason::InternalError {
             if let Some(max) = self.opts.max_local_error_reset_streams {
                 if self.local_error_resets >= max {
@@ -743,13 +725,10 @@ where
         self.pump_stream_data_inner(stream_id, true);
     }
 
-    /// Attempts to drain every stream's queued DATA after the flow
-    /// control windows opened up.
+    /// Drains queued DATA after flow-control windows open.
     ///
-    /// - For per-stream `WINDOW_UPDATE` only that stream is pumped.
-    /// - For connection `WINDOW_UPDATE` we use deficit round-robin
-    ///   for fairness so a single 10 MiB response cannot starve
-    ///   small responses.
+    /// A per-stream update pumps only that stream; a connection update uses
+    /// deficit round-robin so large responses cannot starve small ones.
     #[inline]
     pub(crate) fn drain_pending_data(&mut self, stream_id: Option<u32>) {
         if let Some(id) = stream_id {

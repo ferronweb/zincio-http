@@ -10,13 +10,7 @@ use tokio::io::{AsyncWrite, ReadBuf};
 
 use crate::upgrade_bridge::UpgradedSendStreamBridge;
 
-/// Wraps request stream in read and write halves for an
-/// upgraded connection.
-///
-/// The returned `H2Upgraded` reads the remaining request body (and any
-/// bytes the peer keeps sending) through the stream's receive path; the
-/// returned task writes the consumer's output on the send path until the
-/// consumer closes it.
+/// Splits a request stream into read and write halves for an upgrade.
 #[inline]
 pub(super) fn pair(
     inner_rx: kanal::AsyncReceiver<super::stream::BodyMsg>,

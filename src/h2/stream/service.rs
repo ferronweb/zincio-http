@@ -35,14 +35,8 @@ fn start_send(
 }
 
 pin_project! {
-    /// Drives one stream task: runs the user's `request_fn`, forwards
-    /// interim and final responses to the connection, and pipes the
-    /// response body as chunks.
-    ///
-    /// The task stops when the response is fully handed over, when the
-    /// peer resets the stream, or when the connection goes away. On
-    /// every exit path it first enqueues [`StreamMsg::Closed`], so the
-    /// connection can drop its per-stream state.
+    /// Drives one stream task: runs the handler, forwards its response, and
+    /// signals [`StreamMsg::Closed`] on every exit path.
     pub(crate) struct StreamDriver<Fut, ResB> {
         msg_tx: kanal::AsyncSender<StreamMsg>,
         reset_rx: kanal::AsyncReceiver<u32>,

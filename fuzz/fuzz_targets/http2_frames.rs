@@ -1,14 +1,5 @@
 #![no_main]
 
-//! Fuzz target for the HTTP/2 frame codec (RFC 9113 Section 6).
-//!
-//! Feeds arbitrary bytes to the incremental frame decoder with several
-//! frame-size limits, and re-encodes every frame that parses. The
-//! decoder must never panic, crash, or hang on adversarial input; the
-//! re-encode round trip must likewise stay panic-free even when the
-//! parsed frames came from hostile bytes (e.g. padding that stripped a
-//! field block to nothing while END_HEADERS was clear).
-
 use libfuzzer_sys::fuzz_target;
 use zincio_http::codec::{
     Frame, FrameDecoder, FrameWriter, DEFAULT_MAX_FRAME_SIZE, MAX_FRAME_SIZE_LIMIT,
@@ -28,9 +19,6 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-/// Re-encodes a parsed frame and decodes the result; must not panic.
-/// DECODED frames are padding-free by construction (the decoder strips
-/// padding), so the writer round trip never invents padding.
 fn round_trip(frame: &Frame) {
     let mut out = Vec::new();
     let writer = FrameWriter::new(DEFAULT_MAX_FRAME_SIZE);

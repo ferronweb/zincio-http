@@ -1,9 +1,3 @@
-//! Fuzz the HTTP/3 frame decoder: arbitrary bytes must never panic.
-//!
-//! Unknown and reserved (grease) frame types are skipped, truncated frames
-//! stay buffered, and malformed payloads are reported as `FrameError` —
-//! nothing else is allowed to happen.
-
 #![no_main]
 
 use bytes::Bytes;

@@ -1,18 +1,4 @@
 #![no_main]
-//! Fuzz target for the HTTP/3 connection control plane.
-//!
-//! The driver (`Http3::handle`) consumes the peer's unidirectional streams:
-//! the control stream (frames) and the QPACK encoder/decoder streams. Malformed
-//! control frames, truncated SETTINGS, and adversarial QPACK decoder-stream
-//! instructions are part of the protocol surface and MUST surface as
-//! connection errors — never as a panic or `unsafe` violation. The target
-//! feeds arbitrary bytes as the peer's control, QPACK encoder, and QPACK
-//! decoder streams, drives the connection state machine to its terminal
-//! state (an error close, or idle `Pending`), and asserts it never unwinds.
-//!
-//! The connection is driven by manual polling with a no-op waker. No request
-//! streams are offered (so the request-task spawn path is never taken) and
-//! both timeouts are disabled, so no runtime is required.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -92,9 +78,7 @@ impl SendStream for MockStream {
 impl UniStream for MockStream {}
 impl BidiStream for MockStream {}
 
-/// In-memory QUIC connection: hands out fresh outbound streams (control +
-/// QPACK encoder/decoder) on open, and replays the peer's queued uni streams
-/// (control, QPACK encoder, QPACK decoder) on accept.
+/// In-memory mock QUIC connection for fuzzing.
 struct MockConn {
     peer_unis: VecDeque<Box<dyn UniStream>>,
 }

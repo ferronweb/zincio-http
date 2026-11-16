@@ -1,16 +1,4 @@
 #![no_main]
-//! Fuzz target for the QPACK decoder.
-//!
-//! QPACK field-section and encoder-stream decoding is a classic source of
-//! memory-safety and panic bugs: malformed prefix integers, string-length
-//! overruns, dynamic-table index references past the Base or the eviction
-//! point. The decoder MUST never panic on arbitrary input — malformed
-//! input is part of the protocol and must surface as `QpackError` so the
-//! connection can be closed. This target splits the input into encoder
-//! stream bytes and one field section, replays them, and asserts the
-//! decoder returns `Result`s instead of unwinding; blocked sections are
-//! drained via cancellation and expiry so the buffering machinery is
-//! exercised too.
 
 use libfuzzer_sys::fuzz_target;
 use zincio_http::qpack::Decoder;

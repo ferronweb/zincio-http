@@ -1,13 +1,4 @@
 #![no_main]
-//! Fuzz target for the QPACK encoder/decoder round trip.
-//!
-//! The encoder must be consistent with itself: any header list it encodes
-//! with any capacity and Huffman setting must decode back to the exact same
-//! name/value bytes when the encoder stream is replayed first. A mismatch,
-//! a blocked section, or a decode error here is an encoder bug; a panic is
-//! a memory-safety bug. The input is interpreted as a capacity, a Huffman
-//! flag, and a sequence of (name length, value length, name, value)
-//! records.
 
 use bytes::Bytes;
 use libfuzzer_sys::fuzz_target;

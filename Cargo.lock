@@ -1957,7 +1957,6 @@ version = "0.4.17"
 dependencies = [
  "bytes",
  "criterion",
- "futures-executor",
  "futures-util",
  "h2",
  "h3",

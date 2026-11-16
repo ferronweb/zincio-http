@@ -1,6 +1,6 @@
 {
   "description": "Real-world netbsd header lists encoded by the nghttp3 qpack example tool",
-  "source": "nghttp3 e4988cdb1ca9c5bfb2a591a5b132ddcadf5c739a examples/qpack_encode.cc; ls-qpack 91567706c41c0d97ab8dc576873ecd472d7869fa test/qifs/netbsd.qif",
+  "source": "nghttp3 e06a63ac6a0267149b480cd7fe04c8ea9a366d9e examples/qpack_encode.cc; ls-qpack 91567706c41c0d97ab8dc576873ecd472d7869fa test/qifs/netbsd.qif",
   "table_capacity": 512,
   "max_blocked_streams": 100,
   "delay_encoder_stream": true,
@@ -958,7 +958,7 @@
     {
       "seqno": 20,
       "stream_id": 18,
-      "wire": "0503d1d75090f1e3c2f58fd563a0f1f4291285c87a7f519860b545c373066234d4c469aa245b1a0961a32c5bb42f31a585dd83df5d919d29aee30c78f1e17a8a98d122e7b2663f5588d7cf5e182f6f585f2f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
+      "wire": "0503d1d75090f1e3c2f58fd563a0f1f4291285c87a7f519860b545c373066234d4c469aa245b1a0961a32c5bb42f31a585dd83df5d919d29aee30c78f1e17a8a98d122e7b2663f7588d7cf5e182f6f585f2f0021eaa8a4498f5788ea52d6b0e83772ff2daec1cd48ff86a8eb10649cbfe7",
       "headers": [
         [
           ":method",

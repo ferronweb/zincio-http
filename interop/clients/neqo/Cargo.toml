@@ -4,11 +4,6 @@ version = "0.0.0"
 publish = false
 edition = "2021"
 
-# Pinned indirectly: the driver image builds with `cargo build --locked`
-# against the committed Cargo.lock, so an upstream release cannot turn into
-# an unexplained failure here. The neqo crates move together, so they share
-# one pinned revision.
-
 [dependencies]
 http = "=1.5.0"
 neqo-common = { git = "https://github.com/mozilla/neqo", tag = "v0.35.0" }

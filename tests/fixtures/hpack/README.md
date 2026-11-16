@@ -1,32 +1,27 @@
 # HPACK fixture corpus
 
-Story-format JSON files for HPACK decoder/encoder conformance testing.
+Story-format JSON files, used for testing the HPACK decoder and encoder conformance.
 
 ## Format
 
-Each `story_XX.json` contains a `cases` array; all cases in a story share one
-compression context (dynamic table state carries across cases in order).
+Each `story_XX.json` contains a `cases` array. All cases in a story share one compression context (dynamic table state carries across cases in order).
+
 Each case has:
 
-- `seqno` — sequence number within the story
-- `wire` — the encoded header block as a hex string
-- `headers` — the decoded header list as an ordered array of single-key
-  objects (pseudo-headers and regular headers, in wire order)
-- `header_table_size` (optional) — `SETTINGS_HEADER_TABLE_SIZE` value to
-  apply before this case
+- **`seqno`**: sequence number within the story
+- **`wire`**: the encoded header block as a hex string
+- **`headers`**: the decoded header list as an ordered array of single-key objects (pseudo-headers and regular headers, in wire order)
+- **`header_table_size`** (optional): `SETTINGS_HEADER_TABLE_SIZE` value to apply before this case
 
 ## Source
 
-http2jp/hpack-test-case (formerly nghttp2/hpack-test-case)
+The corpus was sourced from `http2jp/hpack-test-case` (formerly `nghttp2/hpack-test-case`):
 
-https://github.com/http2jp/hpack-test-case
+- **URL**: https://github.com/http2jp/hpack-test-case
+- **Commit**: `8a1406e7d14bfcb6c046021f13cc15cfb162726d` (2019-06-01)
+- **License**: MIT (see `LICENSE` in the source repository).
 
-Commit: `8a1406e7d14bfcb6c046021f13cc15cfb162726d` (2019-06-01)
-License: MIT (see `LICENSE` in the source repository).
-
-All files are verbatim copies from the source repository. The `wire` values
-were produced by each encoder implementation listed below; `raw-data/` in
-the source repo contains the unencoded stories.
+All files are exact copies from the source repository. The `wire` values were produced by each encoder implementation listed below. `raw-data/` in the source repo contains the unencoded stories.
 
 ## Directories
 
@@ -40,14 +35,4 @@ the source repo contains the unencoded stories.
 
 ## Trimming
 
-Large-value stories (`story_21/22/27/29/30.json`) are retained only in
-`nghttp2/` to bound repository size; `nghttp2-16384-4096/` and
-`nghttp2-change-table-size/` do not contain `story_31.json` upstream.
-
-## Usage in tests
-
-- `tests/hpack_fixtures.rs` (committed): corpus parsing + sanity checks.
-- Decoder tests: for each case in story order, decode `wire` and compare the
-  header list to `headers` (shared context; apply `header_table_size` first).
-- Encoder tests: encode the `headers` lists with a fresh encoder, decode the
-  result, and require the decoded header set to match.
+Large-value stories (`story_21/22/27/29/30.json`) are retained only in `nghttp2/` to bound repository size. `nghttp2-16384-4096/` and `nghttp2-change-table-size/` (also produced by nghttp2) do not contain `story_31.json` upstream.

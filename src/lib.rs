@@ -93,17 +93,9 @@ use std::sync::Arc;
 /// The argument is always a [`std::io::Error`] describing the stream
 /// failure (including the stream id where known), so handlers do not
 /// need to depend on protocol-specific error types.
-pub type StreamErrorCallback = Arc<dyn Fn(std::io::Error) + Send + Sync + 'static>;
+pub(crate) type StreamErrorCallback = Arc<dyn Fn(std::io::Error) + Send + Sync + 'static>;
 
 /// Builds a stream-error [`std::io::Error`] with a human-readable message.
-#[cfg(feature = "unstable-internals")]
-#[inline]
-pub fn stream_error_io_error(message: impl Into<String>) -> std::io::Error {
-    std::io::Error::other(message.into())
-}
-
-/// Builds a stream-error [`std::io::Error`] with a human-readable message.
-#[cfg(not(feature = "unstable-internals"))]
 #[inline]
 pub(crate) fn stream_error_io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())

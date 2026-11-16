@@ -1,37 +1,10 @@
-//! HTTP/3 control plane: the control stream, QPACK streams, and the
-//! connection-level state that governs them (RFC 9114 Section 6).
+//! HTTP/3 control plane: the control stream, QPACK streams, and their
+//! connection-level state (RFC 9114 Section 6).
 //!
-//! This is the connection driver's control half. It owns:
-//!
-//! - the three outbound unidirectional streams this endpoint must open
-//!   (control, QPACK encoder, QPACK decoder) via [`ControlStreams::poll_init`],
-//!   the SETTINGS frame that must be its control stream's first frame, and
-//!   the GOAWAY/CANCEL_PUSH/MAX_PUSH_ID frames the driver queues with the
-//!   `send_*` methods and writes with [`ControlStreams::poll_flush`];
-//! - the peer's inbound unidirectional streams, classified by stream
-//!   type, and the peer's control stream, validated frame by frame
-//!   ([`ControlStreams::poll_read`]);
-//! - the QPACK decoder (sized by our own SETTINGS at construction) and
-//!   encoder (created once the peer's SETTINGS bound its dynamic table).
-//!   The encoder's stream instructions and the decoder's acknowledgements
-//!   flow out on the QPACK streams; field sections the decoder unblocks
-//!   are queued for the request-stream handler.
-//!
-//! Rules enforced here, all from RFC 9114 Section 6.2: a second control
-//! stream, a push stream (server side), or a duplicate QPACK stream is
-//! `H3_STREAM_CREATION_ERROR`; an unknown (including reserved/grease) stream
-//! type is ignored, its data drained and discarded (never a connection
-//! error); the first frame of the control stream must be SETTINGS
-//! (`H3_MISSING_SETTINGS` otherwise);
-//! a second SETTINGS or any DATA/HEADERS/PUSH_PROMISE on the control
-//! stream is `H3_FRAME_UNEXPECTED`; a CANCEL_PUSH for a push this endpoint
-//! never promised is `H3_ID_ERROR`; a reduced MAX_PUSH_ID is `H3_ID_ERROR`;
-//! the peer closing any critical stream is `H3_CLOSED_CRITICAL_STREAM` (a
-//! control stream that ends before SETTINGS is `H3_MISSING_SETTINGS`).
-//!
-//! The peer's QPACK decoder stream is drained and discarded: the encoder
-//! emits instructions without tracking acknowledgements, so the stream is
-//! consumed only to keep flow control moving.
+//! The control plane owns this endpoint's outbound unidirectional streams,
+//! the peer's inbound streams, and the QPACK codecs shared with request
+//! streams. RFC 9114 Section 6.2 stream-type and frame-ordering rules are
+//! enforced here; unknown stream types are drained and ignored.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -58,36 +31,28 @@ pub(crate) const STREAM_TYPE_QPACK_ENCODER: u64 = 0x2;
 /// Uni stream type: QPACK decoder stream (RFC 9204 Section 4.4).
 pub(crate) const STREAM_TYPE_QPACK_DECODER: u64 = 0x3;
 
-/// A control-plane failure, each mapped to the connection error code the
-/// driver closes with (see [`ControlError::h3_code`]).
+/// A control-plane failure with its connection error code.
 #[derive(Debug)]
 pub(crate) enum ControlError {
     /// The transport failed.
     Transport(#[allow(dead_code)] TransportError),
-    /// A critical stream (control, QPACK encoder or decoder) was closed or
-    /// reset by the peer (`H3_CLOSED_CRITICAL_STREAM`).
+    /// A critical stream was closed or reset by the peer.
     ClosedCriticalStream,
-    /// The control stream's first frame was not SETTINGS, or the control
-    /// stream ended without any (`H3_MISSING_SETTINGS`).
+    /// The control stream did not start with SETTINGS.
     MissingSettings,
-    /// An unknown uni stream type, a duplicate control/QPACK stream, or a
-    /// push stream on the server (`H3_STREAM_CREATION_ERROR`).
+    /// An unknown stream type or a duplicate control/QPACK stream.
     StreamCreation,
-    /// A second SETTINGS, or a frame that is not permitted on the control
-    /// stream (`H3_FRAME_UNEXPECTED`).
+    /// A frame that is not permitted on the control stream.
     FrameUnexpected,
-    /// A malformed frame payload (`H3_FRAME_ERROR`).
+    /// A malformed frame payload.
     Frame,
-    /// Reserved or duplicate setting identifiers (`H3_SETTINGS_ERROR`).
+    /// Reserved or duplicate setting identifiers.
     Settings,
-    /// A frame longer than this endpoint buffers (`H3_EXCESSIVE_LOAD`;
-    /// RFC 9114 Section 7.1).
+    /// A frame longer than this endpoint buffers.
     ExcessiveLoad,
-    /// A CANCEL_PUSH for a never-promised push, or a reduced MAX_PUSH_ID
-    /// (`H3_ID_ERROR`).
+    /// A CANCEL_PUSH for a never-promised push, or a reduced MAX_PUSH_ID.
     Id,
-    /// The peer's QPACK encoder stream was malformed (RFC 9204 Section 6
-    /// error family `0x02xx`).
+    /// The peer's QPACK encoder stream was malformed.
     Qpack(QpackError),
 }
 
@@ -167,11 +132,6 @@ struct PendingUni {
 }
 
 /// The connection's control plane (RFC 9114 Section 6).
-///
-/// Owned by the connection driver on its single task: `poll_init` opens
-/// and primes the outbound streams, `poll_read` accepts and services the
-/// peer's streams and yields [`ControlEvent`]s, `poll_flush` writes
-/// everything queued on the outbound streams.
 pub(crate) struct ControlStreams {
     local: LocalSettings,
     peer: PeerSettings,
@@ -189,15 +149,11 @@ pub(crate) struct ControlStreams {
     in_encoder: Option<Box<dyn UniStream>>,
     in_decoder: Option<Box<dyn UniStream>>,
     pending_uni: Option<PendingUni>,
-    // A uni stream of unknown (or reserved, i.e. grease) type: drained and
-    // discarded (RFC 9114 Section 6.2: recipients of unknown stream types
-    // MUST discard the data or abort reading, and MUST NOT treat them as a
-    // connection error of any kind).
+    // A uni stream of unknown (including grease) type, drained and ignored
+    // (RFC 9114 Section 6.2).
     in_discard: Option<Box<dyn UniStream>>,
 
-    // The connection's QPACK codecs, shared with the request streams. The
-    // decoder's capacity is fixed by our own SETTINGS; the encoder is
-    // created when the peer's SETTINGS bound its table.
+    // QPACK codecs shared with request streams.
     shared: Arc<SharedCodecs>,
 
     settings_received: bool,
@@ -208,9 +164,7 @@ pub(crate) struct ControlStreams {
 }
 
 impl ControlStreams {
-    /// Creates the control plane for a connection with the given local
-    /// settings. The QPACK decoder is sized by them; nothing is sent until
-    /// [`ControlStreams::poll_init`].
+    /// Creates the control plane with the given local settings.
     #[inline]
     pub(crate) fn new(local: LocalSettings) -> Self {
         let shared = Arc::new(SharedCodecs::new(&local));
@@ -236,11 +190,7 @@ impl ControlStreams {
         }
     }
 
-    /// The QPACK codecs shared with the connection's request streams.
-    ///
-    /// The decoder's capacity is fixed by our own SETTINGS; the encoder is
-    /// created once the peer's SETTINGS bound its table (see
-    /// [`ControlStreams::poll_read`]).
+    /// The QPACK codecs shared with request streams.
     #[inline]
     pub(crate) fn shared(&self) -> &Arc<SharedCodecs> {
         &self.shared
@@ -279,18 +229,15 @@ impl ControlStreams {
         self.goaway_sent
     }
 
-    /// Whether a GOAWAY has been sent; the driver then rejects request
-    /// streams above the announced ID and closes with `H3_NO_ERROR` once
-    /// they drain.
+    /// Whether a GOAWAY has been sent.
     #[cfg(test)]
     #[inline]
     pub(crate) fn shutting_down(&self) -> bool {
         self.goaway_sent.is_some()
     }
 
-    /// Opens the control, QPACK encoder, and QPACK decoder streams and
-    /// queues the SETTINGS frame that must open the control stream.
-    /// Idempotent; call until `Ready`.
+    /// Opens the control stream and queues its SETTINGS frame. Idempotent;
+    /// call until `Ready`.
     #[inline]
     pub(crate) fn poll_init(
         &mut self,
@@ -300,8 +247,8 @@ impl ControlStreams {
         if self.out_control.is_none() {
             let stream = ready!(conn.poll_open_uni(cx).map_err(ControlError::from))?;
             self.out_control = Some(stream);
-            // RFC 9114 Section 6.2.1: the control stream's first byte is
-            // its type; the SETTINGS frame that opens it comes right after.
+            // RFC 9114 Section 6.2.1: the stream type comes first, then
+            // SETTINGS.
             let mut settings = BytesMut::new();
             frame::write_varint(STREAM_TYPE_CONTROL, &mut settings);
             Frame::Settings(self.local.to_frame()).encode(&mut settings);
@@ -310,8 +257,7 @@ impl ControlStreams {
         if self.out_encoder.is_none() {
             let stream = ready!(conn.poll_open_uni(cx).map_err(ControlError::from))?;
             self.out_encoder = Some(stream);
-            // RFC 9204 Section 4.2: the encoder stream starts with its
-            // type byte before any instruction.
+            // RFC 9204 Section 4.2: the encoder stream starts with its type.
             self.encoder_pending
                 .push_back(Bytes::from_static(&[STREAM_TYPE_QPACK_ENCODER as u8]));
         }
@@ -361,9 +307,8 @@ impl ControlStreams {
         Poll::Ready(Ok(()))
     }
 
-    /// Feeds a chunk from the peer's QPACK encoder stream to the decoder,
-    /// stores the field sections it unblocked, and queues the decoder
-    /// stream acknowledgements.
+    /// Feeds a chunk from the peer's QPACK encoder stream to the decoder and
+    /// queues decoder-stream acknowledgements.
     #[inline]
     fn feed_encoder_stream(&mut self, chunk: &[u8]) -> Result<(), ControlError> {
         let (mut unblocked, acks) = {
@@ -410,9 +355,7 @@ impl ControlStreams {
             .map_err(ControlError::Qpack)
     }
 
-    /// Queues a GOAWAY frame for the control stream and remembers `id` as
-    /// the last request stream this endpoint will process. Only the first
-    /// GOAWAY is sent; later calls are no-ops.
+    /// Queues a GOAWAY frame. Only the first call takes effect.
     #[inline]
     pub(crate) fn send_goaway(&mut self, id: u64) {
         if self.goaway_sent.is_some() {
@@ -451,12 +394,8 @@ impl ControlStreams {
         }
     }
 
-    /// Accepts and services the peer's unidirectional streams and reads
-    /// its control stream, yielding at most one event per call.
-    ///
-    /// Polling this in a loop drains everything the peer sent; `Pending`
-    /// means all inbound inputs are idle and the transport registered a
-    /// wakeup for the next chunk.
+    /// Accepts and services the peer's unidirectional streams, yielding at
+    /// most one event per call.
     #[inline]
     pub(crate) fn poll_read(
         &mut self,
@@ -469,8 +408,7 @@ impl ControlStreams {
             }
             let mut progressed = false;
 
-            // Accept one new peer uni stream; only when the previous one
-            // has been classified (the transport delivers in order).
+            // Accept one new peer stream once the previous is classified.
             if self.pending_uni.is_none() {
                 match conn.poll_accept_uni(cx).map_err(ControlError::from)? {
                     Poll::Ready(Some(stream)) => {
@@ -499,18 +437,16 @@ impl ControlStreams {
                         progressed = true;
                     }
                     Poll::Ready(None) => {
-                        // Closing the control stream (a critical stream) is
-                        // always a connection error, regardless of whether
-                        // SETTINGS was seen first (RFC 9114 Section 6.2).
+                        // Closing a critical stream is always a connection
+                        // error (RFC 9114 Section 6.2).
                         return Poll::Ready(Err(ControlError::ClosedCriticalStream));
                     }
                     Poll::Pending => {}
                 }
             }
             loop {
-                // The peer may open and send on its QPACK streams before
-                // its control stream exists; only drain frames when it
-                // does.
+                // QPACK streams may arrive before the control stream; only
+                // drain frames once it exists.
                 let frame = {
                     let control = match self.in_control.as_mut() {
                         Some(control) => control,
@@ -545,11 +481,8 @@ impl ControlStreams {
                 }
             }
 
-            // Feed the peer's QPACK decoder stream to the decoder. Its
-            // instructions (Section Acknowledgments, Stream Cancellations,
-            // Insert Count Increments) acknowledge our encoder's output; the
-            // decoder validates them and the encoder tracks what they free
-            // (RFC 9204 Sections 2.1.1 and 4.4).
+            // Feed the peer's QPACK decoder stream to the encoder and
+            // decoder (RFC 9204 Sections 2.1.1 and 4.4).
             if let Some(stream) = self.in_decoder.as_mut() {
                 match stream.poll_recv(cx).map_err(ControlError::from)? {
                     Poll::Ready(Some(chunk)) => {
@@ -563,11 +496,8 @@ impl ControlStreams {
                 }
             }
 
-            // Drain a stream of unknown type: its semantics are unknown,
-            // so every byte is discarded until it ends or is reset (RFC
-            // 9114 Section 6.2). Only one discard stream is serviced at a
-            // time; when it ends, the next poll accepts the peer's next
-            // stream.
+            // Drain a stream of unknown type; this is never a connection
+            // error (RFC 9114 Section 6.2).
             if let Some(stream) = self.in_discard.as_mut() {
                 match stream.poll_recv(cx).map_err(ControlError::from)? {
                     Poll::Ready(Some(_)) => progressed = true,
@@ -585,9 +515,8 @@ impl ControlStreams {
         }
     }
 
-    /// Reads the type varint of the stream under classification and wires
-    /// it to its handler. The stream stays pending while the varint is
-    /// incomplete.
+    /// Reads the type varint of the pending stream and wires it to its
+    /// handler.
     #[inline]
     fn classify_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ControlError>> {
         loop {
@@ -596,8 +525,8 @@ impl ControlStreams {
                 match pending.stream.poll_recv(cx).map_err(ControlError::from)? {
                     Poll::Ready(Some(chunk)) => chunk,
                     Poll::Ready(None) => {
-                        // The stream ended without a complete type: an
-                        // unknown stream type (RFC 9114 Section 6.2).
+                        // An incomplete stream type is an unknown type
+                        // (RFC 9114 Section 6.2).
                         self.pending_uni = None;
                         return Poll::Ready(Err(ControlError::StreamCreation));
                     }
@@ -648,10 +577,8 @@ impl ControlStreams {
                     self.in_decoder = Some(stream);
                 }
                 _ => {
-                    // Unknown or reserved (grease) stream type: its data
-                    // has no meaning to us, so it is discarded as it
-                    // arrives (RFC 9114 Section 6.2). This is never a
-                    // connection error.
+                    // Unknown or grease stream type: discard its data
+                    // (RFC 9114 Section 6.2).
                     self.in_discard = Some(stream);
                 }
             }
@@ -662,8 +589,7 @@ impl ControlStreams {
     /// Validates one frame read from the peer's control stream.
     #[inline]
     fn handle_control_frame(&mut self, frame: Frame) -> Result<(), ControlError> {
-        // RFC 9114 Section 6.2.1: the first frame must be SETTINGS; any
-        // other first frame is H3_MISSING_SETTINGS.
+        // RFC 9114 Section 6.2.1: SETTINGS must be the first frame.
         if !self.settings_received && !matches!(&frame, Frame::Settings(_)) {
             return Err(ControlError::MissingSettings);
         }

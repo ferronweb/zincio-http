@@ -1,26 +1,15 @@
 //! HTTP/3 connection settings (RFC 9114 Section 7.2.4).
 //!
-//! Each endpoint advertises its own limits in the SETTINGS frame that
-//! opens its control stream; the driver interprets the peer's values from
-//! here. The values that shape our own codecs — the QPACK decoder's
-//! capacity and blocked-stream budget ([`LocalSettings`]) and the QPACK
-//! encoder's bound on the peer's dynamic table ([`PeerSettings`]) — are
-//! the two settings each side understands.
-//!
-//! Validation of the SETTINGS *frame* (reserved identifiers, duplicates)
-//! is the frame codec's job; this module only extracts values and tracks
-//! which identifiers the peer sent.
+//! Each endpoint advertises its limits in SETTINGS; this module splits those
+//! into our [`LocalSettings`] and the peer's [`PeerSettings`]. Frame-level
+//! validation belongs to the frame codec.
 
 use crate::h3::frame::{
     Settings as FrameSettings, SETTINGS_ENABLE_CONNECT_PROTOCOL, SETTINGS_MAX_FIELD_SECTION_SIZE,
     SETTINGS_QPACK_BLOCKED_STREAMS, SETTINGS_QPACK_MAX_TABLE_CAPACITY,
 };
 
-/// The peer's settings as negotiated by its SETTINGS frame, with the
-/// RFC-default values for everything it did not send.
-///
-/// The default for `max_field_section_size` is unlimited (RFC 9114
-/// Section 7.2.4.1); the QPACK settings default to 0 (RFC 9204 Section 5).
+/// The peer's settings, with RFC defaults for absent values.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PeerSettings {
     qpack_max_table_capacity: u64,
@@ -30,39 +19,32 @@ pub struct PeerSettings {
 }
 
 impl PeerSettings {
-    /// The peer's `SETTINGS_QPACK_MAX_TABLE_CAPACITY`: the dynamic table
-    /// capacity our encoder may use on its encoder stream (RFC 9204
-    /// Section 5).
+    /// The peer's `SETTINGS_QPACK_MAX_TABLE_CAPACITY`.
     #[inline]
     pub fn qpack_max_table_capacity(&self) -> u64 {
         self.qpack_max_table_capacity
     }
 
-    /// The peer's `SETTINGS_MAX_FIELD_SECTION_SIZE`: the largest field
-    /// section it will accept, or `None` when unlimited.
+    /// The peer's `SETTINGS_MAX_FIELD_SECTION_SIZE`; `None` means unlimited.
     #[inline]
     pub fn max_field_section_size(&self) -> Option<u64> {
         self.max_field_section_size
     }
 
-    /// The peer's `SETTINGS_QPACK_BLOCKED_STREAMS`: how many of its field
-    /// sections may block waiting for dynamic table entries.
+    /// The peer's `SETTINGS_QPACK_BLOCKED_STREAMS`.
     #[inline]
     pub fn qpack_blocked_streams(&self) -> u64 {
         self.qpack_blocked_streams
     }
 
-    /// The peer's `SETTINGS_ENABLE_CONNECT_PROTOCOL`. A server does not
-    /// consume this value, so it exists for tests and diagnostics only.
+    /// The peer's `SETTINGS_ENABLE_CONNECT_PROTOCOL` (diagnostics/tests).
     #[cfg(test)]
     #[inline]
     pub fn enable_connect_protocol(&self) -> bool {
         self.enable_connect_protocol
     }
 
-    /// Overlays the values of a received SETTINGS frame onto these
-    /// settings. Unknown identifiers are ignored (their grease handling is
-    /// the frame codec's); known ones replace the previous values.
+    /// Overlays a received SETTINGS frame; unknown identifiers are ignored.
     #[inline]
     pub fn apply(&mut self, settings: &FrameSettings) {
         for (id, value) in settings.iter() {
@@ -78,21 +60,13 @@ impl PeerSettings {
 }
 
 /// The settings this endpoint advertises in its SETTINGS frame.
-///
-/// The values bound this endpoint's own codecs: the decoder's table
-/// capacity and blocked-stream budget come from `qpack_max_table_capacity`
-/// and `qpack_blocked_streams`; the peer's encoder is limited by them in
-/// turn. `max_field_section_size` bounds how large a field section this
-/// endpoint will accept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalSettings {
-    /// `SETTINGS_QPACK_MAX_TABLE_CAPACITY`; must not exceed 2^30 - 1
-    /// (RFC 9204 Section 5).
+    /// `SETTINGS_QPACK_MAX_TABLE_CAPACITY` (at most 2^30 - 1).
     pub qpack_max_table_capacity: u64,
     /// `SETTINGS_QPACK_BLOCKED_STREAMS`.
     pub qpack_blocked_streams: u64,
-    /// `SETTINGS_MAX_FIELD_SECTION_SIZE`; `None` means unlimited (the
-    /// RFC default).
+    /// `SETTINGS_MAX_FIELD_SECTION_SIZE`; `None` means unlimited.
     pub max_field_section_size: Option<u64>,
     /// `SETTINGS_ENABLE_CONNECT_PROTOCOL`.
     pub enable_connect_protocol: bool,
@@ -111,11 +85,7 @@ impl Default for LocalSettings {
 }
 
 impl LocalSettings {
-    /// The SETTINGS frame payload this endpoint sends as the first frame
-    /// of its control stream.
-    ///
-    /// Includes a reserved (grease) identifier, as RFC 9114 Section
-    /// 7.2.4.1 recommends; receivers must ignore it.
+    /// The SETTINGS frame this endpoint sends first on its control stream.
     #[inline]
     pub fn to_frame(&self) -> FrameSettings {
         let mut frame = FrameSettings::new();

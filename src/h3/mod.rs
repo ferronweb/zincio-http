@@ -1,12 +1,7 @@
 //! Native HTTP/3 server (RFC 9114) over the [`transport`] abstraction.
 //!
-//! A single connection task owns the control plane ([`control`]) and
-//! accept loops; each accepted request stream is handed to its own task
-//! through an async [`tokio::sync::Mutex`], sharing the connection's
-//! QPACK codecs ([`stream::SharedCodecs`]) with the driver. Requests and
-//! responses are streamed with trailers; `100 Continue` and `103 Early
-//! Hints` interim responses are supported, as are `Date` header caching
-//! and graceful shutdown via a [`CancellationToken`].
+//! A connection task owns the control plane and accepts request streams,
+//! each handled by its own task over the shared QPACK codecs ([`stream::SharedCodecs`]).
 
 mod control;
 mod date;
@@ -76,38 +71,31 @@ const H3_REQUEST_REJECTED: u64 = 0x010b;
 /// (`ConnResetState::note_pending_accept_reset`).
 const PENDING_ACCEPT_RESETS_PER_SECOND: f64 = 50.0;
 
-/// Per-connection budgets for the resets a hostile peer can force the
-/// server to send or observe (RFC 9114 Section 10.5); `None` disables a
-/// budget.
+/// Per-connection budgets for resets a hostile peer can force (RFC 9114
+/// Section 10.5); `None` disables a budget.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ResetLimits {
     pub(super) max_local_error_resets: Option<usize>,
     pub(super) max_pending_accept_resets: Option<usize>,
 }
 
-/// Connection-level reset accounting, shared between the driver and the
-/// per-request tasks (which cannot themselves close the QUIC connection).
+/// Reset accounting shared by the driver and request tasks.
 #[derive(Debug)]
 struct ConnResetState {
     limits: ResetLimits,
-    /// RESET_STREAM frames this endpoint has sent for the peer's protocol
-    /// errors (bounded by `limits.max_local_error_resets`).
+    /// Protocol-error resets this endpoint has sent.
     local_error_resets: usize,
-    /// Streams the peer terminated (RESET_STREAM or STOP_SENDING) before
-    /// this endpoint accepted them, as a bucket that drains at
-    /// [`PENDING_ACCEPT_RESETS_PER_SECOND`] (bounded by
-    /// `limits.max_pending_accept_resets`).
+    /// Streams the peer terminated before acceptance; drains over time.
     pending_accept_resets: f64,
     /// When `pending_accept_resets` was last drained.
     pending_accept_since: Instant,
-    /// Application error code the connection must close with; the driver
-    /// drains it on its next turn.
+    /// Application error code the driver must close with.
     close_code: Option<u64>,
 }
 
 impl ConnResetState {
-    /// Records a locally sent protocol-error reset; returns the code the
-    /// connection must close with when the budget is exceeded.
+    /// Records a locally sent reset, returning a close code when the budget
+    /// is exceeded.
     #[inline]
     fn note_local_error_reset(&mut self) -> Option<u64> {
         match self.limits.max_local_error_resets {
@@ -119,13 +107,8 @@ impl ConnResetState {
         }
     }
 
-    /// Records a peer-terminated, never-accepted stream; returns the code
-    /// the connection must close with when the budget is exceeded.
-    ///
-    /// The budget refills over time: clients cancel requests in normal use,
-    /// and on a long-lived connection a lifetime count eventually closes it
-    /// for no fault. A peer churning through streams (Rapid Reset) still
-    /// exceeds it at once.
+    /// Records a peer reset before acceptance, refilling the budget over
+    /// time. Rapid Reset still exhausts it.
     #[inline]
     fn note_pending_accept_reset(&mut self, now: Instant) -> Option<u64> {
         let max = self.limits.max_pending_accept_resets?;
@@ -148,9 +131,8 @@ pub(crate) struct H3Body {
     stream: SharedRequest,
     data_done: bool,
     send_continue_body: Option<Arc<AtomicBool>>,
-    /// The connection's reset accounting, so a failure that only surfaces
-    /// while the body is read (a trailer field section that fails to
-    /// decode) can still close the connection.
+    /// The connection's reset accounting, so body-time failures can still
+    /// close the connection.
     conn_state: Arc<parking_lot::Mutex<ConnResetState>>,
     content_length: Option<u64>,
     data_read: u64,
@@ -276,13 +258,8 @@ fn h3_stream_error_to_io(error: stream::StreamError) -> std::io::Error {
 }
 
 /// Records a connection-scoped failure that surfaced while the request body
-/// was read.
-///
-/// A trailer field section is decoded while the body is read, so a failure
-/// there (an over-budget field section, for instance) is only visible to the
-/// application as a body error. RFC 9204 Section 6 makes
-/// `QPACK_DECOMPRESSION_FAILED` a connection error, so the connection has to
-/// be closed with it even when the application ignores the body error.
+/// was read. A QPACK failure while decoding trailers must still close the
+/// connection (RFC 9204 Section 6).
 #[inline]
 fn report_connection_error(
     conn_state: &Arc<parking_lot::Mutex<ConnResetState>>,
@@ -328,11 +305,7 @@ fn h3_stream_error(stream_id: u64, error: &impl std::fmt::Display) -> std::io::E
     std::io::Error::other(format!("HTTP/3 stream {stream_id} error: {error}"))
 }
 
-/// Waits until the peer's SETTINGS bound the QPACK encoder, so field
-/// sections can be encoded (RFC 9204 Section 5).
-///
-/// The control plane wakes this task via `encoder_notify` when the
-/// SETTINGS frame arrives; no per-stream waker map is needed.
+/// Waits until the peer's SETTINGS bound the QPACK encoder.
 #[inline]
 async fn wait_for_encoder(shared: &Arc<SharedCodecs>, _stream_id: u64) {
     loop {
@@ -394,9 +367,7 @@ async fn send_trailers(
         .map_err(h3_stream_error_to_io)
 }
 
-/// Ends a response that cannot be completed with `H3_INTERNAL_ERROR`, so
-/// the client sees it was cut short: dropping the stream finishes it, as if
-/// it were whole.
+/// Ends a response that cannot be completed with `H3_INTERNAL_ERROR`.
 async fn abort(stream: &SharedRequest) {
     let mut guard = stream.lock().await;
     let _ = std::future::poll_fn(|cx| guard.poll_reset(cx, H3Error::Internal.code())).await;
@@ -415,11 +386,8 @@ async fn send_finish(stream: &SharedRequest) -> Result<(), std::io::Error> {
     result.or(result2)
 }
 
-/// A request task's end is observed by the connection driver through the
-/// oneshot completion channel it holds in its `FuturesUnordered`; the
-/// sender is dropped when the task finishes.
-///
-/// Drives one accepted request stream to completion.
+/// Drives one accepted request stream to completion. The driver observes
+/// the task through its oneshot completion receiver.
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 async fn handle_request<F, Fut, ResB, ResBE, ResE>(
@@ -484,10 +452,8 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
         // The stream ended without a request: nothing to respond to.
         Ok(None) => return,
         Err(err) => {
-            // The peer terminated the stream (RESET_STREAM or
-            // STOP_SENDING) before its request was read: a reset for a
-            // stream that never reached the handler. Bound how many of
-            // these a peer may churn through (RFC 9114 Section 10.5).
+            // The peer reset the stream before the request was read; count
+            // it against the rapid-reset budget (RFC 9114 Section 10.5).
             if err.is_stream_scoped() {
                 report(&stream_error_callback, stream_id, &err);
                 let mut state = conn_state.lock();
@@ -496,9 +462,8 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                 }
                 return;
             }
-            // A malformed request message: abort the stream with
-            // `H3_MESSAGE_ERROR` rather than the whole connection (RFC
-            // 9114 Section 4.1.2), bounded by the local-reset budget.
+            // A malformed request aborts only its stream (RFC 9114
+            // Section 4.1.2), bounded by the local-reset budget.
             if matches!(err, StreamError::Message) {
                 report(&stream_error_callback, stream_id, &err);
                 let mut guard = stream.lock().await;
@@ -512,15 +477,13 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                 }
                 return;
             }
-            // A connection-scoped protocol violation (a malformed frame,
-            // an invalid frame sequence, or a QPACK error): force the
-            // connection to close with the matching H3 code.
+            // A connection-scoped protocol violation: close with its H3
+            // code.
             conn_state.lock().close_code = Some(err.h3_code());
             return;
         }
     };
 
-    // 100 Continue
     let is_100_continue = send_continue_response
         && request
             .headers()
@@ -545,11 +508,9 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     };
     let mut request = Request::from_parts(request_parts, request_body);
 
-    // Install early hints
     let (early_hints, mut early_hints_rx) = EarlyHints::new_lazy();
     request.extensions_mut().insert(early_hints);
 
-    // Install HTTP upgrade
     let upgrade = if let Some(recv_stream) = upgrade {
         let (upgrade_tx, upgrade_rx) = oneshot::async_channel();
         let upgrade = Upgrade::new(upgrade_rx);
@@ -599,11 +560,9 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
         .await;
 
         match next {
-            // HTTP response
             Some(futures_util::future::Either::Left(response_result)) => {
                 break response_result;
             }
-            // 103 Early Hints
             Some(futures_util::future::Either::Right(Ok((headers, sender)))) => {
                 sender
                     .into_inner()
@@ -622,7 +581,6 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
             Some(futures_util::future::Either::Right(Err(()))) => {
                 early_hints_open = false;
             }
-            // 100 Continue
             None => {
                 if let Err(error) = send_interim_response(&stream, StatusCode::CONTINUE).await {
                     report(&stream_error_callback, stream_id, &error);
@@ -634,7 +592,6 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
     };
 
     let Ok(mut response) = response_result else {
-        // Return early if the request handler returns an error
         if let Err(error) = response_result {
             report(
                 &stream_error_callback,
@@ -721,7 +678,6 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
                         match frame.into_data() {
                             Ok(data) => {
                                 if data.is_empty() {
-                                    // Don't waste bandwidth using empty frames...
                                     continue;
                                 }
                                 if let Err(error) = send_data(&stream, data).await {
@@ -783,14 +739,9 @@ async fn handle_request<F, Fut, ResB, ResBE, ResE>(
 
 /// An HTTP/3 connection handler.
 ///
-/// `Http3` wraps a QUIC connection (`Io`) and drives the HTTP/3 server
-/// connection over the native transport stack. It supports:
-///
-/// - Concurrent request stream handling
-/// - Streaming request/response bodies and trailers
-/// - Automatic `100 Continue` and `103 Early Hints` interim responses
-/// - Per-connection `Date` header caching
-/// - Graceful shutdown via a [`CancellationToken`]
+/// `Http3` wraps a QUIC connection and drives concurrent request streams,
+/// streaming bodies and trailers, interim responses, `Date` caching, and
+/// graceful shutdown.
 ///
 /// # Construction
 ///
@@ -816,11 +767,7 @@ where
     Io: transport::Connection + Unpin + 'static,
 {
     /// Creates a new `Http3` connection handler wrapping the given QUIC
-    /// connection.
-    ///
-    /// The `options` value controls HTTP/3 protocol configuration, connection
-    /// setup and accept timeouts, and optional behaviour such as automatic
-    /// `100 Continue` responses; see [`Http3Options`] for details.
+    /// connection. See [`Http3Options`] for configuration.
     ///
     /// # Example
     ///
@@ -838,24 +785,16 @@ where
         }
     }
 
-    /// Attaches a [`CancellationToken`] for graceful shutdown.
-    ///
-    /// When the token is cancelled, the handler sends an HTTP/3 graceful
-    /// shutdown signal (GOAWAY), stops accepting new request streams, and
-    /// exits cleanly once the in-flight requests have drained.
+    /// Attaches a [`CancellationToken`] for graceful shutdown. Cancelling it
+    /// sends GOAWAY and drains in-flight requests before closing.
     #[inline]
     pub fn graceful_shutdown_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
         self
     }
 
-    /// Attaches a stream error callback invoked with a [`std::io::Error`]
-    /// whenever an HTTP/3 stream fails (for example a malformed request,
-    /// a reset by the peer, or a response write failure).
-    ///
-    /// Connection-level failures continue to surface as the `Err` return
-    /// value of [`HttpProtocol::handle`]; this callback only observes
-    /// per-stream failures so they can be logged.
+    /// Attaches a callback invoked whenever an HTTP/3 stream fails.
+    /// Connection-level failures still surface as the handler's `Err`.
     #[inline]
     pub fn stream_error_callback<F>(mut self, callback: F) -> Self
     where
@@ -901,9 +840,7 @@ where
             let header_read_timeout = options.header_read_timeout;
             let enable_connect_protocol = options.local_settings.enable_connect_protocol;
 
-            // The QUIC handshake may not be complete yet (0-RTT); wait for
-            // it, bounded by the handshake timeout. Server-side QUIC
-            // connections are already complete when handed over.
+            // The handshake may still be incomplete (0-RTT).
             if let Some(timeout) = options.handshake_timeout {
                 zincio::time::timeout(timeout, async {
                     while !conn.is_handshake_complete() {
@@ -922,10 +859,8 @@ where
 
             let mut controls = ControlStreams::new(options.local_settings.clone());
             let shared = Arc::clone(controls.shared());
-            // Request-stream tasks record connection-scoped errors and reset
-            // accounting here; the driver closes the connection with the
-            // recorded H3 code (a request task cannot itself close the QUIC
-            // connection).
+            // Request tasks record connection-scoped errors and reset
+            // accounting here; the driver acts on them.
             let conn_state: Arc<parking_lot::Mutex<ConnResetState>> =
                 Arc::new(parking_lot::Mutex::new(ConnResetState {
                     limits: ResetLimits {
@@ -945,28 +880,21 @@ where
             }
             let mut accept_sleep: Option<zincio::time::Sleep> = None;
             let mut shutdown_sleep: Option<zincio::time::Sleep> = None;
-            // Once graceful shutdown has drained every in-flight request we
-            // must not issue `CONNECTION_CLOSE` immediately: quinn's
-            // `close()` sends exactly one frame and then stops transmitting,
-            // discarding any response bytes still buffered in the send
-            // scheduler. A short grace window lets the background transmit
-            // flush those bytes so the peer observes the response, not the
-            // close.
+            // quinn's `close()` stops transmitting after one frame and can
+            // discard buffered response bytes. Give the sender a short grace
+            // window before closing.
             let mut drain_grace: Option<zincio::time::Sleep> = None;
             let mut shutdown = false;
             let mut control_dead = false;
-            // When set, the connection is being torn down by a protocol error
-            // and must close with this H3 code (rather than the graceful
-            // GOAWAY + H3_NO_ERROR path).
+            // Set when tearing down with a protocol error rather than a
+            // graceful GOAWAY.
             let mut closing_with: Option<u64> = None;
-            // Human-readable detail for `closing_with`, when the error that
-            // triggered the close carried more context than its code.
+            // Human-readable detail for `closing_with`.
             let mut closing_detail: Option<String> = None;
             let mut outcome: Option<Result<(), std::io::Error>> = None;
             let mut last_request_id = 0u64;
 
-            // Bring up the control plane (control stream plus QPACK
-            // encoder/decoder streams) and write the initial SETTINGS.
+            // Open the control plane and write the initial SETTINGS.
             std::future::poll_fn(|cx| -> Poll<Result<(), std::io::Error>> {
                 ready!(controls
                     .poll_init(&mut conn, cx)
@@ -977,8 +905,7 @@ where
             .await?;
 
             std::future::poll_fn(|cx| loop {
-                // A request-stream task hit a connection-scoped error: close
-                // the connection with the H3 code it recorded.
+                // A request task recorded a connection-scoped error.
                 if let Some(code) = conn_state.lock().close_code.take() {
                     if closing_with.is_none() {
                         closing_with = Some(code);
@@ -987,10 +914,7 @@ where
                     }
                 }
 
-                // Accept-timeout window: it bounds how long an idle
-                // connection waits for its next request, so it only runs
-                // while no request is in flight; a request (or response)
-                // that outlasts it must not start the graceful shutdown.
+                // The accept timeout only runs while no request is in flight.
                 let mut timeout_fired = false;
                 if !ongoing.is_empty() {
                     accept_sleep = None;
@@ -1004,9 +928,8 @@ where
                     continue;
                 }
 
-                // Shutdown backstop: while graceful shutdown is pending on
-                // in-flight requests, re-poll periodically so the close
-                // with `H3_NO_ERROR` cannot be starved by a lost wake-up.
+                // Re-poll periodically while waiting for in-flight requests
+                // to drain.
                 if let Some(sleep) = shutdown_sleep.as_mut() {
                     if let Poll::Ready(()) = Pin::new(&mut *sleep).poll(cx) {
                         sleep.reset(Instant::now() + std::time::Duration::from_millis(10));
@@ -1035,10 +958,7 @@ where
                     }
                 }
 
-                // If the waiter is taken and waked up:
-                //   the task would be "waken" up and run again
-                // If the waiter is taken but nothing waked up while this is polling:
-                //   the task would be still running
+                // Register the driver waker for encoder-stream pushes.
                 {
                     let mut waiter = shared.driver_waiter.lock();
                     if waiter.as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
@@ -1046,18 +966,13 @@ where
                     }
                 }
 
-                // Hand the request streams' queued QPACK encoder
-                // instructions to the control plane.
+                // Hand queued QPACK encoder instructions to the control
+                // plane.
                 controls.queue_encoder_streams_from_shared(&shared);
 
-                // Write the control plane's outbound streams. If the peer tore
-                // it down while we were shutting down (e.g. an h3 0.0.8 client
-                // resets its receive side once it sees GOAWAY), we stop trying
-                // to flush — the connection is already draining — but we must
-                // NOT close yet: in-flight requests still need to be served so
-                // the peer receives their responses before the application
-                // close. `control_dead` records that state so we neither spin
-                // on a terminal error nor send a close prematurely.
+                // Write the control plane's outbound streams. If the peer
+                // tears it down during shutdown, stop flushing but keep serving
+                // in-flight requests.
                 if !control_dead {
                     match controls.poll_flush(cx) {
                         Poll::Ready(Ok(())) => {}
@@ -1080,9 +995,8 @@ where
                     loop {
                         match controls.poll_read(&mut conn, cx) {
                             Poll::Ready(Ok(Some(ControlEvent::Goaway { .. }))) => {
-                                // The client is going away: stop accepting new
-                                // request streams and close once the in-flight
-                                // ones drain.
+                                // The client is going away: stop accepting
+                                // and drain.
                                 if !shutdown {
                                     shutdown = true;
                                     outcome = Some(Ok(()));
@@ -1106,9 +1020,8 @@ where
                     }
                 }
 
-                // Shutdown: either a protocol error (close immediately with
-                // the recorded H3 code) or a graceful drain (GOAWAY, then
-                // H3_NO_ERROR once every in-flight request has drained).
+                // Shutdown: close with the recorded H3 error, or send GOAWAY
+                // and drain gracefully.
                 if shutdown {
                     if let Some(code) = closing_with {
                         ready!(conn
@@ -1126,11 +1039,8 @@ where
                         controls.send_goaway(last_request_id);
                     }
                     if ongoing.is_empty() {
-                        // Give the send scheduler a grace window to flush
-                        // the last response before we close. See the comment
-                        // on `drain_grace` above.
-                        // Polled as soon as it is armed, so its wake-up is
-                        // registered before this poll returns `Pending`.
+                        // Let the sender flush the last response before
+                        // closing.
                         let grace = drain_grace.get_or_insert_with(|| {
                             zincio::time::sleep(std::time::Duration::from_millis(50))
                         });
@@ -1221,23 +1131,15 @@ where
                     }
                 }
 
-                // Collect finished request tasks. Their completion
-                // receivers were registered on first poll, so parking
-                // below wakes whenever one finishes; a completion can
-                // race the registration, so re-check before parking. An
-                // empty set yields `None` from `poll_next` (there are no
-                // completions to observe).
+                // Reap finished request tasks.
                 match ongoing.poll_next_unpin(cx) {
                     Poll::Ready(Some(Ok(()))) => continue,
                     Poll::Ready(Some(Err(_))) => continue,
                     Poll::Ready(None) => {}
                     Poll::Pending => {}
                 }
-                // Shutting down with nothing in flight: go round once more so
-                // the block above arms the drain-grace timer, then park on it.
-                // Looping until the timer fires instead busy-waits for the
-                // whole grace window (a timer that only completes when the
-                // runtime drives it never fires at all).
+                // Go round once more to arm the drain-grace timer before
+                // parking.
                 if ongoing.is_empty() && shutdown && drain_grace.is_none() {
                     continue;
                 }

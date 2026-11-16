@@ -1,35 +1,10 @@
 //! HTTP/3 frame codec (RFC 9114 Section 7).
 //!
-//! Frames on HTTP/3 streams have the layout `Type (i), Length (i), Frame
-//! Payload (..)` where `Type` and `Length` are QUIC variable-length
-//! integers (RFC 9000 Section 16). This module provides:
-//!
-//! - [`FrameDecoder`]: an incremental, buffer-owning decoder. The driver
-//!   feeds received bytes in and pulls completed [`Frame`]s out; `Ok(None)`
-//!   means more input is needed. Unknown and reserved (grease) frame types
-//!   are skipped without surfacing, per RFC 9114 Section 7.2.8.
-//! - [`Frame::encode`]: the corresponding serializer.
-//!
-//! Parse-level validation follows RFC 9114 Section 7.1: a frame payload
-//! must contain exactly the fields identified for its type — extra bytes
-//! and truncated fields are `H3_FRAME_ERROR`, as are redundant
-//! (non-minimal) variable-length integer encodings (Section 10.8, RFC 9000
-//! Section 16). HTTP/2 frame types without an HTTP/3 equivalent
-//! (PRIORITY, PING, WINDOW_UPDATE, CONTINUATION) are `H3_FRAME_UNEXPECTED`
-//! (Section 7.2.8).
-//!
-//! What this module deliberately does *not* enforce — it is the driver's
-//! (connection-state) job:
-//!
-//! - stream-type rules (which frame types are legal on which stream, and
-//!   that SETTINGS is first on the control stream),
-//! - `SETTINGS_MAX_FIELD_SECTION_SIZE` limits on HEADERS/PUSH_PROMISE
-//!   payloads,
-//! - push ID / stream ID semantics (`H3_ID_ERROR`).
-//!
-//! A clean end of stream (FIN) with `buffered() != 0` means the last frame
-//! was truncated; RFC 9114 Section 7.1 requires that be treated as
-//! `H3_FRAME_ERROR` by the driver.
+//! Frames use QUIC variable-length integers for their type and length.
+//! [`FrameDecoder`] parses them incrementally and [`Frame::encode`] writes
+//! them; unknown and grease frames are skipped. Payload validation and the
+//! driver's stream-type rules are described by the RFC sections on each
+//! item.
 
 use std::collections::VecDeque;
 
@@ -39,33 +14,13 @@ use rustc_hash::FxHashMap;
 /// The largest value a QUIC variable-length integer can carry.
 pub const MAX_VARINT: u64 = (1 << 62) - 1;
 
-/// Maximum number of setting identifiers accepted in one SETTINGS frame
-/// (RFC 9114 Section 7.2.4).
-///
-/// Fewer than ten identifiers are defined; the implementation sends five.
-/// A frame carrying more than this is abusive (CVE-class algorithmic
-/// complexity: previously each entry paid a linear duplicate scan, giving
-/// O(n^2) work in the entry count) and is rejected with `H3_SETTINGS_ERROR`.
+/// Maximum number of setting identifiers accepted in one SETTINGS frame.
 pub const MAX_SETTINGS_ENTRIES: usize = 32;
 
 /// Maximum SETTINGS frame payload in bytes.
-///
-/// With [`MAX_SETTINGS_ENTRIES`] entries of at most 16 bytes each (two
-/// 8-byte varints) no legitimate payload exceeds 512 bytes; this leaves
-/// 8x headroom while preventing an attacker from forcing the decoder to
-/// buffer megabytes before parsing. Oversized payloads are rejected with
-/// `H3_SETTINGS_ERROR` as soon as the length is declared, without waiting
-/// for (or buffering) the full payload.
 pub const MAX_SETTINGS_PAYLOAD: u64 = 4096;
 
 /// Maximum payload of any single HTTP/3 frame in bytes.
-///
-/// QUIC varint lengths reach 2^62-1, but buffering an unbounded payload
-/// before parsing is a memory-exhaustion vector. This ceiling (parity with
-/// HTTP/2's `MAX_FRAME_SIZE_LIMIT`) bounds per-frame buffering; larger
-/// declared lengths are rejected with `H3_FRAME_ERROR` immediately.
-/// Legitimate traffic (control frames are tiny; request bodies stream as
-/// sequences of smaller DATA frames) is unaffected.
 pub const MAX_FRAME_PAYLOAD: u64 = 16_777_215;
 
 /// `DATA` frame type (RFC 9114 Section 7.2.1).
@@ -84,28 +39,18 @@ pub const FRAME_GOAWAY: u64 = 0x7;
 pub const FRAME_MAX_PUSH_ID: u64 = 0xd;
 
 /// `SETTINGS_QPACK_MAX_TABLE_CAPACITY` (RFC 9204 Section 5).
-///
-/// Consumed by the control-stream driver when interpreting peer SETTINGS.
 #[allow(dead_code)]
 pub const SETTINGS_QPACK_MAX_TABLE_CAPACITY: u64 = 0x1;
 /// `SETTINGS_MAX_FIELD_SECTION_SIZE` (RFC 9114 Section 7.2.4.1).
-///
-/// Consumed by the control-stream driver when interpreting peer SETTINGS.
 #[allow(dead_code)]
 pub const SETTINGS_MAX_FIELD_SECTION_SIZE: u64 = 0x6;
 /// `SETTINGS_QPACK_BLOCKED_STREAMS` (RFC 9204 Section 5).
-///
-/// Consumed by the control-stream driver when interpreting peer SETTINGS.
 #[allow(dead_code)]
 pub const SETTINGS_QPACK_BLOCKED_STREAMS: u64 = 0x7;
 /// `SETTINGS_ENABLE_CONNECT_PROTOCOL` (RFC 9114 Section 7.2.4.1).
-///
-/// Consumed by the control-stream driver when interpreting peer SETTINGS.
 #[allow(dead_code)]
 pub const SETTINGS_ENABLE_CONNECT_PROTOCOL: u64 = 0x8;
 /// `SETTINGS_H3_DATAGRAM` (RFC 9297 Section 3.1).
-///
-/// Consumed by the control-stream driver when interpreting peer SETTINGS.
 #[allow(dead_code)]
 pub const SETTINGS_H3_DATAGRAM: u64 = 0x33;
 
@@ -115,12 +60,8 @@ pub type Setting = (u64, u64);
 /// A parsed `SETTINGS` frame payload (RFC 9114 Section 7.2.4).
 ///
 /// Settings are kept in wire order. Reserved (grease) identifiers are
-/// dropped on decode and may be added for encoding; unknown identifiers
-/// are preserved and ignored by the driver.
-///
-/// Duplicate detection is O(1) per entry via an index map (first value
-/// wins, matching the previous linear-scan semantics), so parsing is O(n)
-/// overall rather than O(n^2).
+/// dropped on decode; unknown identifiers are preserved and ignored by the
+/// driver.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     entries: Vec<Setting>,
@@ -194,11 +135,6 @@ impl Settings {
 }
 
 /// An HTTP/3 frame (RFC 9114 Section 7.2).
-///
-/// `Data` and `Headers` payloads are opaque byte ranges. `Data` is the
-/// streamed body chunk (the driver may hand it to the body reader
-/// without copying); `Headers` and `PushPromise` field sections are
-/// QPACK-encoded and decoded by the driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     /// `DATA`: a chunk of the request or response body.
@@ -221,14 +157,7 @@ pub enum Frame {
 }
 
 impl Frame {
-    /// Whether this is one of the known HTTP/3 frame types (RFC 9114
-    /// Section 7.2).
-    ///
-    /// The decoder never surfaces unknown or reserved (grease) frame types
-    /// — they are consumed and skipped (Section 7.2.8) — so every frame it
-    /// returns is by construction a known type. This method documents the
-    /// request-stream rule (Section 4.1) that after the trailers only
-    /// unknown frames may still appear.
+    /// Whether this is a known HTTP/3 frame type.
     #[inline]
     pub fn is_known(&self) -> bool {
         matches!(
@@ -299,9 +228,6 @@ impl Frame {
 }
 
 /// Errors raised by [`FrameDecoder::next_frame`].
-///
-/// Each variant corresponds to a distinct RFC 9114 connection error code
-/// (see [`FrameError::h3_code`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {
     /// `H3_FRAME_ERROR` (0x0106): the frame payload does not exactly match
@@ -338,21 +264,14 @@ impl FrameError {
 
 /// Incremental HTTP/3 frame decoder.
 ///
-/// The decoder owns its buffer: the driver calls [`FrameDecoder::extend`]
-/// with every received chunk and [`FrameDecoder::next_frame`] once per
-/// event-loop turn, draining as many complete frames as are buffered.
-///
-/// The buffer is a `VecDeque<Bytes>` that keeps each QUIC chunk intact.
-/// `extend` is zero-copy (push), and `DATA` payloads are returned as
-/// refcounted slices when they lie in a single chunk, avoiding the
-/// `BytesMut` coalesce on every fragment.
+/// Keeps each QUIC chunk intact so extending is zero-copy and DATA payloads
+/// can be returned as refcounted slices.
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
     bufs: VecDeque<Bytes>,
     len: usize,
-    /// The largest HEADERS or PUSH_PROMISE payload buffered: this endpoint's
-    /// `SETTINGS_MAX_FIELD_SECTION_SIZE` (an encoded field section is not
-    /// larger than the decoded one it counts). `None`: [`MAX_FRAME_PAYLOAD`].
+    /// The largest HEADERS or PUSH_PROMISE payload buffered; `None` means
+    /// [`MAX_FRAME_PAYLOAD`].
     max_field_section: Option<u64>,
 }
 
@@ -389,12 +308,8 @@ impl FrameDecoder {
         self.len
     }
 
-    /// Pops the next complete frame, if any.
-    ///
-    /// Returns `Ok(None)` when the buffer does not yet hold a complete
-    /// frame; callers must extend the buffer and poll again. Unknown and
-    /// reserved frame types are consumed and skipped (RFC 9114 Section
-    /// 7.2.8) — a known frame behind them is still returned.
+    /// Pops the next complete frame, if any. Unknown and grease frame types
+    /// are skipped (RFC 9114 Section 7.2.8).
     #[inline]
     pub fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
         loop {
@@ -407,11 +322,9 @@ impl FrameDecoder {
             let Some((len, len_len)) = self.parse_varint_at(type_len, false)? else {
                 return Ok(None);
             };
-            // Bound per-frame buffering before waiting for (or allocating)
-            // the payload: oversized SETTINGS are a settings violation,
-            // anything else absurdly large is a frame error. Checking the
-            // declared length first means a multi-megabyte abusive frame
-            // is rejected from its ~10-byte header without buffering.
+            // Bound buffering before waiting for the payload. Oversized
+            // SETTINGS are a settings violation; other oversized frames are
+            // excessive load.
             if ty == FRAME_SETTINGS && len > MAX_SETTINGS_PAYLOAD {
                 return Err(FrameError::Settings);
             }
@@ -423,9 +336,7 @@ impl FrameDecoder {
             {
                 return Err(FrameError::ExcessiveLoad);
             }
-            // CANCEL_PUSH, GOAWAY and MAX_PUSH_ID hold one varint, at most 8
-            // bytes: a longer payload cannot match (so it is not
-            // buffered first).
+            // Single-varint frame types cannot exceed 8 bytes.
             if matches!(ty, FRAME_CANCEL_PUSH | FRAME_GOAWAY | FRAME_MAX_PUSH_ID) && len > 8 {
                 return Err(FrameError::Frame);
             }
@@ -464,10 +375,8 @@ impl FrameDecoder {
         }
     }
 
-    /// Returns the type of the next frame without consuming it, or `None`
-    /// when the type varint is incomplete. Used to pre-reject control-plane
-    /// frames on request streams (RFC 9114 Sections 7.2.3-7.2.7) before the
-    /// decoder parses (and would otherwise accept or mismatch) them.
+    /// Returns the next frame type without consuming it, or `None` when the
+    /// type varint is incomplete.
     #[inline]
     pub fn peek_frame_type(&self) -> Option<u64> {
         match self.parse_varint_at(0, true) {
@@ -603,14 +512,10 @@ fn parse_settings(payload: &[u8]) -> Result<Settings, FrameError> {
     }
     let mut settings = Settings::new();
     let mut rest = payload;
-    // Bound the entry count so a many-entry frame is rejected after
-    // bounded work. Duplicate detection below is O(1) per entry via the
-    // settings index (previously a linear scan per entry, i.e. O(n^2)
-    // in the entry count), so the overall parse is O(n).
+    // Bound the entry count before doing more work.
     let mut count: usize = 0;
-    // Grease identifiers are not kept, but a repeated one is still a
-    // duplicate (RFC 9114 Section 7.2.4.1; h3spec "treats a
-    // repeated setting identifier as an error whatever its value").
+    // Grease identifiers are dropped, but repeats still count as duplicates
+    // (RFC 9114 Section 7.2.4.1).
     let mut grease = Vec::new();
     while !rest.is_empty() {
         let Some((id, id_len)) = parse_varint(rest) else {
@@ -640,10 +545,7 @@ fn parse_settings(payload: &[u8]) -> Result<Settings, FrameError> {
     Ok(settings)
 }
 
-/// Parses the single variable-length integer that must fill `buf` exactly
-/// (used for CANCEL_PUSH, GOAWAY, MAX_PUSH_ID, and the PUSH_PROMISE push
-/// ID). A truncated or non-minimal integer, or trailing bytes, is
-/// `H3_FRAME_ERROR` (RFC 9114 Sections 7.1 and 10.8).
+/// Parses the single variable-length integer that must fill `buf` exactly.
 #[inline]
 fn take_varint(buf: &[u8]) -> Result<u64, FrameError> {
     let Some((value, n)) = parse_varint(buf) else {
@@ -661,14 +563,7 @@ fn take_varint(buf: &[u8]) -> Result<u64, FrameError> {
 const MIN_VARINT: [u64; 4] = [0, 1 << 6, 1 << 14, 1 << 30];
 
 /// Parses a QUIC variable-length integer (RFC 9000 Section 16) from the
-/// front of `buf`.
-///
-/// Returns `Ok(None)` when `buf` is shorter than the encoding; `Err` when
-/// the encoding is non-minimal (a protocol violation, per RFC 9000 Section
-/// 16, surfaced as `H3_FRAME_ERROR`).
-///
-/// The control plane uses this to read uni stream type varints before a
-/// stream is assigned its role.
+/// front of `buf`. Returns `None` if truncated.
 #[inline]
 pub(crate) fn parse_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let first = *buf.first()?;
@@ -680,8 +575,8 @@ pub(crate) fn parse_varint(buf: &[u8]) -> Option<(u64, usize)> {
     for &byte in &buf[1..len] {
         value = (value << 8) | u64::from(byte);
     }
-    // Don't do MIN_VARINT check (such overlong encodings are allowed per RFC 9000,
-    // except for frame types)
+    // Overlong encodings are allowed except for frame types, which
+    // `parse_varint_at` checks.
     Some((value, len))
 }
 

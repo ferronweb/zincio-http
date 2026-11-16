@@ -1,23 +1,9 @@
 //! QPACK dynamic table (RFC 9204 Section 3.2).
 //!
-//! The dynamic table is a FIFO list of field lines shared between the
-//! encoder and the decoder. Entries are added at the insertion point and
-//! evicted from the dropping point (oldest first) to keep the table size
-//! within its capacity. The size of an entry is the sum of its name length,
-//! its value length, and 32 additional bytes (Section 3.2.1).
-//!
-//! Absolute indices are fixed for the lifetime of an entry; relative and
-//! post-base indices are computed from the context (most-recent insertion
-//! for encoder-stream instructions, the field section's Base for field line
-//! representations). The table itself is context-free: callers translate
-//! indices via the lookup helpers.
-//!
-//! The dynamic table can contain duplicate entries, and entries can have
-//! empty values; neither is an error (Section 3.2).
-//!
-//! Consumption: the encoder adds entries (Section 4.3) and the decoder
-//! materializes them from encoder-stream instructions; both use the same
-//! structure.
+//! A FIFO table shared by the encoder and decoder. Entries are inserted at
+//! the front and evicted oldest-first; an entry costs name + value + 32
+//! bytes (Section 3.2.1). Absolute indices are stable, while relative and
+//! post-base indices are resolved by callers.
 
 use std::collections::VecDeque;
 
@@ -30,43 +16,27 @@ use rustc_hash::FxHashMap;
 struct NameValue(Bytes, Bytes);
 
 /// Error returned when an entry cannot be inserted.
-///
-/// The caller maps this to `QPACK_ENCODER_STREAM_ERROR` on the decoder
-/// side; a well-behaved encoder never triggers it (it only inserts entries
-/// that fit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InsertError {
-    /// The entry (name + value + 32) is larger than the table capacity.
+    /// The entry is larger than the table capacity.
     EntryTooLarge,
 }
 
 /// FIFO dynamic table. `entries[0]` is the most recently inserted entry.
-///
-/// Invariants:
-/// - `size <= capacity` at all times;
-/// - the absolute index of `entries[i]` is `inserted - 1 - i`;
-/// - `inserted` counts entries inserted over the table's whole lifetime
-///   (absolute indices are never reused).
 pub(crate) struct DynamicTable {
     entries: VecDeque<(Bytes, Bytes)>,
     capacity: u64,
     size: u64,
     inserted: u64,
-    /// Exact `(name, value)` -> absolute index for the dynamic entries, always
-    /// holding the newest absolute index of each pair.
+    /// Exact `(name, value)` to newest absolute index.
     exact: FxHashMap<NameValue, u64>,
-    /// Name -> absolute index for the dynamic entries, holding the newest
-    /// absolute index of each name.
+    /// Name to newest absolute index.
     name: FxHashMap<Bytes, u64>,
-    /// When false (decoder side), the lookup maps are never built or
-    /// consulted: the decoder resolves entries by absolute index and never
-    /// calls `find_*`, so maintaining them would be pure overhead.
+    /// Whether to maintain the lookup maps (encoder side only).
     maintain_maps: bool,
 }
 
-/// Below this many dynamic entries, `find_full_or_name`/`find_name` use a
-/// linear scan (cheap early exits); at or above it they use the hash maps.
-/// Tiny tables favour the scan; large tables favour the hash map.
+/// Below this many entries, lookups use a linear scan.
 pub(crate) const HYBRID_THRESHOLD: usize = 64;
 
 impl std::fmt::Debug for DynamicTable {
@@ -153,24 +123,14 @@ impl DynamicTable {
         name.len() as u64 + value.len() as u64 + 32
     }
 
-    /// Changes the table capacity, evicting entries from the dropping point
-    /// (oldest first) until the table fits.
-    ///
-    /// Setting the capacity to 0 clears the table; a later increase restores
-    /// normal operation with an empty table (RFC 9204 Section 3.2.2).
+    /// Changes the table capacity, evicting oldest entries until it fits.
     #[inline]
     pub(crate) fn set_capacity(&mut self, capacity: u64) {
         self.capacity = capacity;
         self.evict_to_fit(capacity);
     }
 
-    /// Number of entries that inserting an entry of the given `size` would
-    /// evict from the dropping point (oldest first), or 0 if it fits.
-    ///
-    /// The encoder uses this to decide whether an insert would invalidate
-    /// references to older entries made earlier in the same field section:
-    /// eviction only removes the oldest entries, so an insert is safe while
-    /// every evicted absolute index is below the smallest referenced index.
+    /// Number of oldest entries an insert of `size` would evict.
     #[inline]
     pub(crate) fn would_evict(&self, size: u64) -> u64 {
         let need_freed = size.saturating_sub(self.capacity - self.size);
@@ -189,13 +149,7 @@ impl DynamicTable {
         evicted
     }
 
-    /// Number of entries that would be evicted from the dropping point if
-    /// the capacity were reduced to `target` (0 when nothing would be
-    /// evicted).
-    ///
-    /// The decoder uses this to reject a capacity reduction that would
-    /// evict entries with an absolute index at or above its Known Received
-    /// Count (RFC 9204 Section 2.1.1).
+    /// Number of entries a capacity reduction to `target` would evict.
     #[inline]
     pub(crate) fn evict_for_capacity(&self, target: u64) -> u64 {
         let mut size = 0u64;
@@ -212,8 +166,6 @@ impl DynamicTable {
     }
 
     /// Finds the most recent exact match and the most recent name match.
-    /// The encoder uses both results when choosing a field-line
-    /// representation, so this avoids scanning a busy dynamic table twice.
     #[inline]
     pub(crate) fn find_full_or_name(
         &self,
@@ -246,9 +198,7 @@ impl DynamicTable {
         (None, name_match)
     }
 
-    /// Finds the most recently inserted entry whose name matches `name`.
-    ///
-    /// Returns the entry's absolute index.
+    /// Finds the most recently inserted entry whose name matches.
     #[inline]
     pub(crate) fn find_name(&self, name: &[u8]) -> Option<u64> {
         if self.maintain_maps && self.entries.len() > HYBRID_THRESHOLD {
@@ -262,12 +212,7 @@ impl DynamicTable {
         None
     }
 
-    /// Inserts a new entry at the insertion point, evicting oldest entries
-    /// as needed.
-    ///
-    /// Returns [`InsertError::EntryTooLarge`] if the entry does not fit in
-    /// the table capacity at all; on success the entry receives absolute
-    /// index `inserted()`.
+    /// Inserts an entry, evicting oldest entries as needed.
     #[inline]
     pub(crate) fn insert(&mut self, name: Bytes, value: Bytes) -> Result<(), InsertError> {
         let entry_size = Self::entry_size(&name, &value);
@@ -295,9 +240,7 @@ impl DynamicTable {
         Some((name.as_ref(), value.as_ref()))
     }
 
-    /// Clones the reference-counted bytes at a deque position. This is used
-    /// by the decoder when materializing a field section: dynamic entries
-    /// can be shared with the output instead of copied into new allocations.
+    /// Clones the refcounted bytes at a deque position.
     #[inline]
     pub(crate) fn entry_bytes_at(&self, i: u64) -> Option<(Bytes, Bytes)> {
         let i = usize::try_from(i).ok()?;
@@ -346,9 +289,7 @@ impl DynamicTable {
                 None => break,
             };
             self.size -= Self::entry_size(&name, &value);
-            // The evicted entry is the oldest (smallest absolute index) of its
-            // key, so a map value equals `abs` only when it was the sole
-            // occurrence and must be dropped.
+            // Drop a map entry only when it points at the evicted occurrence.
             let abs = self.inserted - self.entries.len() as u64 - 1;
             if self.maintain_maps {
                 if self.name.get(name.as_ref()).copied() == Some(abs) {

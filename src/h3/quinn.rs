@@ -1,30 +1,8 @@
 //! `quinn` transport adapter (behind the `h3-quinn` feature).
 //!
-//! Implements the transport traits of [`crate::h3::transport`] over the real
-//! `quinn` 0.11 API, keeping the native HTTP/3 logic 100% quinn-free. The
-//! mapping is mechanical:
-//!
-//! - [`quinn::Connection`] ↔ [`transport::Connection`]: `open_uni`/
-//!   `accept_uni`/`accept_bi` are driven through persistent `stream::unfold`
-//!   futures. The quinn accept/open futures are stateful — each poll
-//!   registers a waiter that must stay alive across polls, so creating a
-//!   fresh future every poll loses wakeups. The `unfold` streams keep one
-//!   in-flight future for the adapter's whole lifetime, `close` for
-//!   `poll_shutdown`, `side()` for stream-id parity, `handshake_data()` for
-//!   handshake state.
-//! - `quinn` uni streams are half-open: `open_uni` yields a write-only
-//!   [`quinn::SendStream`] and `accept_uni` a read-only [`quinn::RecvStream`].
-//!   The HTTP/3 layer needs both halves on one `UniStream` handle, so the
-//!   adapter maps them onto an internal enum (see [`UniStream`]).
-//! - `RecvStream::poll_recv` uses a [`ReusableBoxFuture`] wrapping
-//!   `read_chunk(usize::MAX, true)` (ordered reads only), the same
-//!   zero-copy pattern `h3-quinn` uses.
-//! - `SendStream::poll_send` must consume its whole buffer, so partial
-//!   `poll_write` results are staged in an internal `BytesMut` remainder.
-//!
-//! Error mapping follows RFC 9114 Section 8.1 semantics: application close
-//! codes and stream errors carry their wire `u64` codes, everything else
-//! degenerates to [`TransportError::Transport`].
+//! Maps the transport traits onto quinn's stateful streams. Persistent
+//! accept/open futures preserve wakeups, and partial writes are buffered so
+//! the HTTP/3 side can send whole buffers.
 
 use std::{
     future::Future,
@@ -51,17 +29,10 @@ type AcceptUniItem = Result<quinn::RecvStream, quinn::ConnectionError>;
 type OpenUniItem = Result<quinn::SendStream, quinn::ConnectionError>;
 
 /// A `quinn` connection adapted to the HTTP/3 transport traits.
-///
-/// Wraps a[`quinn::Connection`]; clone the underlying connection and adapt
-/// each side independently as needed.
 pub struct Connection {
     conn: quinn::Connection,
-    /// Persistent `accept_bi` futures.
-    ///
-    /// The quinn futures are stateful: a poll registers a waiter which must
-    /// stay alive across polls, otherwise a wakeup arriving between polls is
-    /// lost and the accept never completes. The `unfold` streams keep one
-    /// future alive for the lifetime of the adapter.
+    /// Persistent `accept_bi` futures; quinn's accept futures are stateful
+    /// and must survive across polls.
     accept_bi: BoxStream<AcceptBiItem>,
     accept_uni: BoxStream<AcceptUniItem>,
     /// Lazily created the first time a stream is opened.
@@ -70,10 +41,6 @@ pub struct Connection {
 
 impl Connection {
     /// Adapts an established `quinn` connection.
-    ///
-    /// The given connection must already have completed its handshake (for
-    /// example `Connecting::await` on the client side, or awaiting an
-    /// `Incoming` on the server side).
     #[inline]
     pub fn new(conn: quinn::Connection) -> Self {
         let accept_bi = Box::pin(stream::unfold(conn.clone(), |conn| async move {
@@ -91,10 +58,6 @@ impl Connection {
     }
 
     /// The reason the connection was closed, if it has been.
-    ///
-    /// Exposes the raw `quinn` close reason; the transport traits only report
-    /// a closed connection via [`Accept::poll_accept`], so this is used to
-    /// observe the application close code directly (diagnostics, tests).
     #[inline]
     pub fn close_reason(&self) -> Option<quinn::ConnectionError> {
         self.conn.close_reason()
@@ -132,9 +95,7 @@ impl Accept for Connection {
                 send: Send::new(send),
                 recv: Recv::new(recv),
             })))),
-            // The accept stream yields `Err` once the connection is closed
-            // and every already-received stream has been drained; the trait
-            // contract says that is `Ok(None)`.
+            // A closed or drained accept stream is the end of accepts.
             Some(Err(_)) => Poll::Ready(Ok(None)),
             None => unreachable!("unfold stream never ends"),
         }
@@ -179,20 +140,10 @@ impl transport::Connection for Connection {
 /// The send half of a QUIC stream, adapted to [`SendStreamTrait`].
 pub(crate) struct Send {
     stream: quinn::SendStream,
-    /// Bytes queued for transmission but not yet consumed by `poll_write`.
-    ///
-    /// `poll_write` may only accept a prefix of the buffer before the
-    /// stream's flow-control window is exhausted, so the remainder is kept
-    /// here between polls.
+    /// Bytes accepted by `poll_write` but not yet sent.
     buf: bytes::BytesMut,
-    /// Identity (data pointer + length) of the most recent caller slice that
-    /// is still (partially) buffered in `buf`.
-    ///
-    /// Callers re-pass the same `&[u8]` on every re-poll after a
-    /// flow-control `Pending` (their own queues keep the unsent bytes and
-    /// are only popped once `Ready`). Without this marker, each re-poll would
-    /// `extend_from_slice` the same bytes again, duplicating and growing
-    /// `buf` without bound — fatal for large responses under backpressure.
+    /// Identity of the caller slice still buffered, preventing duplicate
+    /// appends when a pending write is re-polled.
     in_flight: Option<(usize, usize)>,
     stopped_future: Option<BoxFuture<Result<Option<quinn::VarInt>, quinn::StoppedError>>>,
 }
@@ -215,9 +166,8 @@ impl Send {
 
     #[inline]
     fn poll_send(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<Result<(), TransportError>> {
-        // Only buffer `data` when it is a fresh slice. Callers re-pass the
-        // same `&[u8]` on each re-poll (their queue is popped only on
-        // `Ready`); re-appending it would duplicate and grow `buf` forever.
+        // Buffer only a fresh caller slice; re-appending a re-polled slice
+        // would grow `buf` without bound.
         let id = (data.as_ptr() as usize, data.len());
         if !data.is_empty() && self.in_flight != Some(id) {
             self.buf.extend_from_slice(data);
@@ -228,10 +178,8 @@ impl Send {
                 self.in_flight = None;
                 return Poll::Ready(Ok(()));
             }
-            // quinn's `poll_write` either writes a non-empty prefix (and
-            // reports how much) or returns `Pending` due to flow control
-            // with nothing written and a waker registered, so the loop can
-            // never spin: once the window is full it parks.
+            // quinn writes a non-empty prefix or returns Pending without
+            // writing, so this loop cannot spin.
             let written = ready!(Pin::new(&mut self.stream).poll_write(cx, &self.buf))
                 .map_err(map_write_error)?;
             debug_assert!(written > 0);
@@ -253,9 +201,8 @@ impl Send {
 
     #[inline]
     fn poll_finish(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
-        // quinn's `finish` is synchronous; its only failure mode is an
-        // already-finished or reset stream, which is not an error for the
-        // caller.
+        // quinn's `finish` is synchronous; failure means already finished or
+        // reset, which is harmless here.
         let _ = self.stream.finish();
         Poll::Ready(Ok(()))
     }
@@ -284,11 +231,7 @@ type ReadChunkFuture = ReusableBoxFuture<
 /// The receive half of a QUIC stream, adapted to [`RecvStreamTrait`].
 pub(crate) struct Recv {
     stream: Option<quinn::RecvStream>,
-    /// In-flight `read_chunk` future.
-    ///
-    /// `ReusableBoxFuture` holds the borrowing `read_chunk` future across
-    /// polls; the boxed stream is returned alongside the result and stashed
-    /// back so the future can be re-armed for the next chunk.
+    /// In-flight `read_chunk` future, reused across polls.
     read_chunk_fut: ReadChunkFuture,
 }
 
@@ -381,23 +324,16 @@ impl SendStreamTrait for BidiStream {
         _cx: &mut Context<'_>,
         code: u64,
     ) -> Poll<Result<(), TransportError>> {
-        // `STOP_SENDING` is a direction-specific frame: on a bidirectional
-        // stream it asks the peer to stop sending in *our* receive
-        // direction, which is the receive half's job in quinn.
+        // STOP_SENDING applies to our receive direction, which quinn keeps
+        // on the receive half.
         Poll::Ready(self.recv.stop_sending(code))
     }
 }
 
 impl BidiStreamTrait for BidiStream {}
 
-/// A unidirectional QUIC stream (control stream, QPACK encoder/decoder
-/// streams, and any extension stream types).
-///
-/// The HTTP/3 layer observes both directions through this handle even though
-/// quinn's uni streams are half-open: streams we opened are write-only
-/// ([`UniStream::Send`]) and streams we accepted are read-only
-/// ([`UniStream::Recv`]). Operations in the wrong direction surface a
-/// [`TransportError::Transport`].
+/// A unidirectional QUIC stream, write-only when opened and read-only when
+/// accepted.
 pub(crate) enum UniStream {
     /// A stream this endpoint opened: write-only.
     Send(Send),

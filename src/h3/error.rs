@@ -1,43 +1,22 @@
 //! HTTP/3 error types and the QUIC transport error abstraction.
 //!
-//! Two families of errors exist in the HTTP/3 stack:
-//!
-//! - [`TransportError`]: failures surfaced by the QUIC transport
-//!   abstraction ([`crate::h3::transport`]). The HTTP/3 layer translates
-//!   these into connection closes and stream resets with typed HTTP/3
-//!   codes, and into `io::Error` at the `HttpProtocol` boundary.
-//! - [`H3Error`]: the typed application errors of RFC 9114 Section 8.1,
-//!   each with its wire code. QPACK errors ([`crate::h3::qpack::QpackError`])
-//!   form the RFC 9204 Section 6 family (codes `0x200`-`0x202`) and live
-//!   with the QPACK codec; the connection driver maps both families onto
-//!   reset/shutdown codes and `io::Error`.
-//!
-//! Error codes of the format `0x1f * N + 0x21` are reserved; per RFC 9114
-//! Section 8.1 they are treated as equivalent to `H3_NO_ERROR`.
+//! [`TransportError`] covers QUIC failures; [`H3Error`] carries RFC 9114
+//! application codes. QPACK errors live with the QPACK codec.
 
 use std::{error::Error, fmt, io};
 
-/// Errors surfaced by the QUIC transport abstraction
-/// ([`crate::h3::transport`]).
-///
-/// Adapters translate their stack's error types into these variants; the
-/// HTTP/3 layer never inspects stack-specific errors.
+/// Errors surfaced by the QUIC transport abstraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportError {
-    /// The connection was closed by the peer with an application error
-    /// `code` (an HTTP/3 error code, or 0 for `H3_NO_ERROR`).
+    /// The peer closed the connection with an application error `code`.
     Closed { code: u64 },
-    /// The connection was closed by transport-level events (for example a
-    /// transport error, idle timeout, or a local close) without an
-    /// application error code.
+    /// The connection closed for a transport-level reason.
     Transport,
     /// The connection timed out.
     Timeout,
-    /// The peer reset the stream (`RESET_STREAM`) with the given error
-    /// `code`; the read side of the stream is terminated.
+    /// The peer reset the stream with the given error `code`.
     Reset { code: u64 },
-    /// The peer sent `STOP_SENDING` with the given error `code`; the write
-    /// side of the stream is terminated.
+    /// The peer sent `STOP_SENDING` with the given error `code`.
     Stopped { code: u64 },
     /// Any other transport-level failure.
     Other,
@@ -68,8 +47,6 @@ impl From<TransportError> for io::Error {
                 io::Error::new(io::ErrorKind::ConnectionReset, err)
             }
             TransportError::Timeout => io::Error::new(io::ErrorKind::TimedOut, err),
-            // Same conversion strategy as the previous `h3` wrapper: any
-            // other error surfaces as `io::Error::other`.
             TransportError::Transport | TransportError::Other => io::Error::other(err),
         }
     }
@@ -155,10 +132,7 @@ impl H3Error {
     }
 
     /// Looks up a known HTTP/3 error by its RFC 9114 Section 8.1 code.
-    ///
-    /// Returns `None` for unknown codes. Per RFC 9114 Section 8.1, unknown
-    /// codes — including the reserved `0x1f * N + 0x21` family — are
-    /// treated as equivalent to [`H3Error::NoError`] by the wire protocol.
+    /// Unknown codes are treated as [`H3Error::NoError`].
     pub const fn from_code(code: u64) -> Option<H3Error> {
         use H3Error::*;
         Some(match code {

@@ -1,31 +1,9 @@
 //! QPACK decoder (RFC 9204 Sections 2.2, 4.3 and 4.5).
 //!
-//! Consumption: the HTTP/3 layer drives the decoder per connection (it feeds
-//! encoder stream data and decoded field sections, and drains the decoder
-//! stream).
-//!
-//! The decoder materializes the shared dynamic table (Section 4.2) from the
-//! encoder stream (Section 4.3): every instruction is parsed and mirrored as
-//! a table insertion or capacity change. Field sections (Section 4.5) are
-//! decoded against the table; a section whose Required Insert Count exceeds
-//! the decoder's insert count is buffered as blocked (Section 2.2.1) until a
-//! later encoder stream update makes it decodable.
-//!
-//! The decoder emits decoder stream instructions (Section 4.4): a Section
-//! Acknowledgment for every decoded field section with a positive Required
-//! Insert Count (Section 2.2.2.1), a Stream Cancellation for abandoned or
-//! timed-out blocked streams (Section 2.2.2.2), and coalesced Insert Count
-//! Increment instructions (Section 2.2.2.3).
-//!
-//! Validation is strict: malformed instructions are `QPACK_ENCODER_STREAM_
-//! ERROR`, malformed field sections are `QPACK_DECOMPRESSION_FAILED`, a
-//! Required Insert Count that does not equal the largest referenced absolute
-//! index plus one is rejected (Sections 2.1.2 and 2.2.1), evictions that
-//! touch entries with an absolute index at or above the Known Received Count
-//! are rejected (Sections 2.1.1 and 3.2.2), and field sections that push a
-//! stream's cumulative decoded size over the advertised
-//! `SETTINGS_MAX_FIELD_SECTION_SIZE` are rejected (RFC 9114 Section
-//! 7.2.4.1).
+//! The decoder mirrors the dynamic table from the peer's encoder stream,
+//! decodes field sections (buffering blocked ones until their required
+//! insertions arrive), and emits the decoder-stream acknowledgements and
+//! cancellations described by RFC 9204 Section 4.4.
 
 use std::collections::VecDeque;
 
@@ -80,25 +58,10 @@ const LITERAL_POST_BASE_NAME_REF: u8 = 0b0000_0000;
 #[allow(dead_code)]
 const LITERAL_LITERAL_NAME: u8 = 0b0010_0000;
 
-/// The per-field overhead a field list's size includes (RFC 9114 Section
-/// 4.2.2): "the size of a field list is calculated based on the uncompressed
-/// size of fields, including the length of the name and value in bytes plus
-/// an overhead of 32 bytes for each field".
-///
-/// Charging it per field is what keeps a field section's cost proportional
-/// to the number of fields it carries: without it, a field line with an
-/// empty name and an empty value would cost nothing, and a section could
-/// hold millions of fields while staying "within" the advertised limit.
+/// Per-field overhead in a field list's size (RFC 9114 Section 4.2.2).
 pub const FIELD_OVERHEAD: usize = 32;
 
 /// The maximum number of fields a single field section may carry.
-///
-/// The field-section size limit already bounds the number of fields (each
-/// one costs at least [`FIELD_OVERHEAD`] bytes of it), but that limit can
-/// be disabled. This cap does not depend on it: it keeps one section's
-/// decoded fields within a few hundred kilobytes, and it stays below the
-/// 24 576 entries an `http::HeaderMap` holds, so a section that fits the
-/// cap can always be inserted into one.
 pub const MAX_FIELDS_PER_SECTION: usize = 8192;
 
 /// A field section that was buffered as blocked and has since been decoded
@@ -111,8 +74,7 @@ pub struct UnblockedSection {
     pub headers: Vec<(Bytes, Bytes)>,
 }
 
-/// A field section buffered because its Required Insert Count had not been
-/// reached yet (RFC 9204 Section 2.2.1).
+/// A field section buffered until its Required Insert Count is reached.
 #[derive(Debug)]
 struct BlockedSection {
     stream_id: u64,
@@ -126,60 +88,28 @@ struct BlockedSection {
 #[derive(Debug)]
 pub struct Decoder {
     dynamic: DynamicTable,
-    /// The maximum dynamic table capacity advertised by this decoder in
-    /// SETTINGS_QPACK_MAX_TABLE_CAPACITY (RFC 9204 Section 3.2.3).
+    /// The dynamic table capacity advertised in SETTINGS (RFC 9204 Section
+    /// 3.2.3).
     max_capacity: u64,
-    /// Total insertions and duplications received on the encoder stream.
-    /// Part of the field section prefix decoding context.
-    ///
-    /// The Known Received Count, which rules evictability and the Insert
-    /// Count Increment instruction, is tracked separately in
-    /// [`Decoder::known_received`] (RFC 9204 Section 2.1.4).
-    ///
-    /// Invariant: `known_received <= inserted`.
+    /// Known Received Count (RFC 9204 Section 2.1.4).
     known_received: u64,
     /// Blocked field sections, in arrival order.
     blocked: VecDeque<BlockedSection>,
-    /// Number of blocked sections per stream. Kept separately so admission
-    /// does not rescan every buffered section (or allocate a temporary list)
-    /// for every field section received while the table is catching up.
+    /// Number of blocked sections per stream.
     blocked_by_stream: FxHashMap<u64, usize>,
-    /// Decoded field-section size per stream, summed so the
-    /// `SETTINGS_MAX_FIELD_SECTION_SIZE` budget applies across a stream's
-    /// field sections (request headers, trailers) like
-    /// `SETTINGS_MAX_HEADER_LIST_SIZE` does for HTTP/2 — not per section.
-    ///
-    /// A stream's budget is only charged when a section is actually
-    /// decoded, so a section buffered as blocked is charged when it is
-    /// unblocked. Entries are dropped when the stream finishes, is reset,
-    /// or is abandoned ([`Decoder::stream_finished`],
-    /// [`Decoder::stream_cancelled`], [`Decoder::expire_blocked`]); QUIC
-    /// stream IDs are never reused, so a stale entry could not affect
-    /// another stream anyway.
+    /// Decoded field-section size per stream, accumulating across headers and
+    /// trailers.
     section_size_by_stream: FxHashMap<u64, usize>,
-    /// The maximum number of streams that may be blocked at once,
-    /// SETTINGS_QPACK_BLOCKED_STREAMS (RFC 9204 Section 5).
+    /// Maximum number of streams that may be blocked at once.
     max_blocked_streams: usize,
-    /// Cap on the total size of a decoded field section (the sum of the
-    /// lengths of the names and values of its field lines, plus the
-    /// per-field overhead of [`FIELD_OVERHEAD`]), the locally advertised
-    /// `SETTINGS_MAX_FIELD_SECTION_SIZE` (RFC 9114 Section 7.2.4.1).
-    /// Exceeding it is `QPACK_DECOMPRESSION_FAILED`.
-    ///
-    /// `usize::MAX` means the limit is disabled.
+    /// Locally advertised `SETTINGS_MAX_FIELD_SECTION_SIZE`; `usize::MAX`
+    /// disables it.
     max_field_section_size: usize,
     /// Decoder stream instructions awaiting transmission.
     decoder_stream: Vec<u8>,
-    /// Bytes of the peer's encoder stream received so far but not yet forming
-    /// a complete instruction. QPACK encoder-stream instructions carry
-    /// variable-length strings and can span the arbitrary chunk boundaries of
-    /// the underlying QUIC stream, so partial instructions are buffered here
-    /// until the rest arrives (RFC 9204 Section 4.3) instead of being treated
-    /// as a stream error.
+    /// Bytes of a partial encoder-stream instruction.
     encoder_stream_pending: Vec<u8>,
-    /// Bytes of the peer's decoder stream received so far but not yet forming
-    /// a complete instruction. The same chunk-boundary buffering as
-    /// `encoder_stream_pending` (RFC 9204 Section 4.4).
+    /// Bytes of a partial decoder-stream instruction.
     decoder_stream_pending: Vec<u8>,
 }
 
@@ -187,11 +117,8 @@ pub struct Decoder {
 /// continuation octets carrying a 62-bit integer (RFC 9204 Section 4.1.1).
 const MAX_DECODER_STREAM_INSTRUCTION: usize = 10;
 
-/// Byte length of a string literal whose length integer starts at the
-/// beginning of `buf` with `prefix_bits` (the Huffman/control bit occupies the
-/// high bit of that prefix, so the integer itself uses `prefix_bits - 1`
-/// bits). Returns `None` when `buf` is too short to hold the length integer
-/// or its advertised content.
+/// Byte length of a string literal at the start of `buf`, including its
+/// length integer. Returns `None` when the input is incomplete.
 fn string_len(buf: &[u8], prefix_bits: u8) -> Option<usize> {
     let int_prefix = prefix_bits - 1;
     let int_len = integer::encoded_len(buf, int_prefix)?;
@@ -263,12 +190,8 @@ impl Decoder {
         }
     }
 
-    /// Sets the maximum size of a decoded field section: the locally
-    /// advertised `SETTINGS_MAX_FIELD_SECTION_SIZE` (RFC 9114 Section
-    /// 7.2.4.1). The budget is per stream and accumulates across its field
-    /// sections (request headers and trailers); a section that pushes a
-    /// stream's cumulative size over this is rejected with
-    /// `QPACK_DECOMPRESSION_FAILED` (RFC 9204 Section 4.5).
+    /// Sets the locally advertised `SETTINGS_MAX_FIELD_SECTION_SIZE`. The
+    /// budget accumulates across a stream's field sections.
     ///
     /// The size of a field list is the sum of its fields' name and value
     /// lengths plus [`FIELD_OVERHEAD`] per field (RFC 9114 Section 4.2.2).
@@ -308,22 +231,13 @@ impl Decoder {
     }
 
     /// Parses the peer's QPACK decoder stream instructions (RFC 9204
-    /// Section 4.4): Section Acknowledgments, Stream Cancellations, and
-    /// Insert Count Increments.
-    ///
-    /// An Insert Count Increment with a zero value is a decoder stream
-    /// error (Section 4.4.3); any malformed instruction is too. The
-    /// instructions are not otherwise acted upon: this decoder emits its own
-    /// decoder-stream instructions and never tracks the peer's
-    /// acknowledgements, so it only needs to validate what the peer sends.
+    /// Section 4.4). Malformed instructions and zero-value increments are
+    /// rejected.
     #[inline]
     pub fn feed_decoder_stream(&mut self, buf: &[u8]) -> Result<(), QpackError> {
         self.decoder_stream_pending.extend_from_slice(buf);
-        // A decoder-stream instruction is a single prefixed integer whose
-        // length is known once enough bytes arrive; parse only complete
-        // instructions and buffer any trailing partial one (RFC 9204 4.4). The
-        // QUIC stream beneath can deliver an instruction split across chunks,
-        // and a single chunk can carry many complete instructions.
+        // Buffer partial instructions: a QUIC chunk can split them or carry
+        // several.
         let mut consumed = 0;
         while consumed < self.decoder_stream_pending.len() {
             let Some(len) = decoder_instruction_len(&self.decoder_stream_pending[consumed..])
@@ -365,23 +279,13 @@ impl Decoder {
         Ok(())
     }
 
-    /// Processes the encoder stream instructions in `buf`, materializing
-    /// dynamic table updates.
-    ///
-    /// Returns the field sections that were blocked and can now be decoded,
-    /// in arrival order. The Section Acknowledgment for each is queued in
-    /// the decoder stream, together with a coalesced Insert Count Increment
-    /// when the table grew beyond the acknowledged count.
+    /// Processes encoder-stream instructions and returns newly decodable
+    /// blocked field sections in arrival order.
     #[inline]
     pub fn feed_encoder_stream(&mut self, buf: &[u8]) -> Result<Vec<UnblockedSection>, QpackError> {
         self.encoder_stream_pending.extend_from_slice(buf);
-        // Buffer partial instructions: an encoder-stream instruction can carry
-        // variable-length strings and may arrive split across the arbitrary
-        // chunk boundaries of the underlying QUIC stream, so only complete
-        // instructions are processed (RFC 9204 Section 4.3). A complete
-        // instruction is bounded by the dynamic table capacity, so a much
-        // larger buffered prefix can never become one and is rejected to bound
-        // memory against a peer that streams continuation bytes.
+        // Buffer partial instructions. A complete instruction is bounded by
+        // the table capacity, so a much larger prefix is abusive.
         let cap = (self.max_capacity as usize).saturating_add(1024);
         if self.encoder_stream_pending.len() > cap {
             return Err(QpackError::EncoderStream);
@@ -395,8 +299,8 @@ impl Decoder {
             if consumed + len > self.encoder_stream_pending.len() {
                 break;
             }
-            // Copy the complete instruction so it can be parsed while `self`
-            // is mutably borrowed by the insert below (no borrow aliasing).
+            // Copy the complete instruction to avoid borrowing `self`
+            // mutably while inserting.
             let instr = self.encoder_stream_pending[consumed..consumed + len].to_vec();
             self.parse_encoder_instruction(&instr)?;
             consumed += len;
@@ -513,17 +417,9 @@ impl Decoder {
         Ok(())
     }
 
-    /// Decodes an encoded field section received on `stream_id`.
-    ///
-    /// Returns the decoded header list, or `None` when the section was
-    /// buffered as blocked (it is returned by a later
-    /// [`Decoder::feed_encoder_stream`] call).
-    ///
-    /// `now` is the caller's monotonic clock (any unit); it is recorded for
-    /// [`Decoder::expire_blocked`]. Sections that cannot be processed in
-    /// order are never decoded early: a section on a stream with buffered
-    /// blocked sections joins the queue even when it could be decoded
-    /// already (RFC 9204 Section 2.2.1 requires in-order processing).
+    /// Decodes an encoded field section. Returns `None` when it is buffered
+    /// as blocked. Sections on a stream with blocked predecessors are queued
+    /// to preserve order (RFC 9204 Section 2.2.1).
     #[inline]
     pub fn decode_block(
         &mut self,
@@ -560,25 +456,14 @@ impl Decoder {
         Ok(Some(headers))
     }
 
-    /// Notifies that `stream_id` finished receiving (the peer closed its
-    /// send side): no further field sections can arrive on it, so its
-    /// field-section size budget is released. Safe to call when the stream
-    /// never carried a field section.
-    ///
-    /// Must only be called when no field section of the stream remains
-    /// buffered as blocked: a buffered section is decoded later by
-    /// [`Decoder::feed_encoder_stream`], which would then restart the
-    /// stream's budget from scratch. The HTTP/3 layer calls this only upon
-    /// observing the peer's stream end, which implies every section of the
-    /// stream (headers, trailers) has decoded.
+    /// Notifies that a stream finished: its field-section budget is released.
     #[inline]
     pub fn stream_finished(&mut self, stream_id: u64) {
         self.section_size_by_stream.remove(&stream_id);
     }
 
-    /// Notifies that `stream_id` was reset or abandoned: buffered blocked
-    /// sections for it are dropped and a Stream Cancellation instruction is
-    /// queued (RFC 9204 Section 2.2.2.2). Returns the instruction.
+    /// Notifies that a stream was reset or abandoned: drops its blocked
+    /// sections and queues a Stream Cancellation.
     #[cfg(feature = "unstable-internals")]
     #[inline]
     pub fn stream_cancelled(&mut self, stream_id: u64) -> Bytes {
@@ -591,9 +476,8 @@ impl Decoder {
         Bytes::from_owner(out)
     }
 
-    /// Drops blocked sections older than `max_age` in the caller's clock
-    /// units, queueing one Stream Cancellation per affected stream. Returns
-    /// the instructions.
+    /// Drops blocked sections older than `max_age` and queues one Stream
+    /// Cancellation per affected stream.
     #[cfg(feature = "unstable-internals")]
     #[inline]
     pub fn expire_blocked(&mut self, now: u64, max_age: u64) -> Bytes {
@@ -608,9 +492,7 @@ impl Decoder {
             }
         }
         if !cancelled.is_empty() {
-            // Cancelling a stream abandons every queued section on it, not
-            // merely the one whose timer fired. Keep the queue and its
-            // per-stream accounting in lockstep.
+            // Cancelling a stream abandons every queued section on it.
             self.blocked
                 .retain(|blocked| !cancelled.contains(&blocked.stream_id));
             for id in &cancelled {
@@ -622,18 +504,8 @@ impl Decoder {
         Bytes::from(out)
     }
 
-    /// Decodes a field section whose Required Insert Count has been reached
-    /// (immediate or retried from the blocked queue), validating that the
-    /// announced Required Insert Count equals the largest referenced
-    /// absolute index plus one (RFC 9204 Section 2.1.2).
-    ///
-    /// `budget` is the decoded size still available to the stream this
-    /// section belongs to; the section is rejected as soon as it exceeds
-    /// it, so a hostile section never materializes more than the budget
-    /// allows. `None` means the limit is disabled; the number of fields is
-    /// then still capped by [`MAX_FIELDS_PER_SECTION`].
-    ///
-    /// Returns the decoded field lines and the size they occupy.
+    /// Decodes a field section whose Required Insert Count has been reached,
+    /// validating its prefix and size budget (RFC 9204 Section 2.1.2).
     #[inline]
     fn decode_ready(
         &self,
@@ -860,14 +732,8 @@ impl Decoder {
         *self.blocked_by_stream.entry(stream_id).or_insert(0) += 1;
     }
 
-    /// Charges `size` against `stream_id`'s field-section budget and
-    /// returns the stream's new cumulative total. Creates the entry on
-    /// first use.
-    ///
-    /// `size` is the decoded size of the field lines — the name and value
-    /// octets plus [`FIELD_OVERHEAD`] per field — not the size of the
-    /// encoded block: Huffman encoding and index references make the two
-    /// diverge arbitrarily (RFC 9114 Section 7.2.4.1).
+    /// Charges `size` against `stream_id` and returns the new cumulative
+    /// total. `size` is the decoded field-list size, not the encoded size.
     #[inline]
     fn account_section(&mut self, stream_id: u64, size: usize) -> usize {
         let total = self.section_size_by_stream.entry(stream_id).or_insert(0);
@@ -877,9 +743,6 @@ impl Decoder {
 
     /// The decoded size still available to `stream_id`, or `None` when the
     /// limit is disabled.
-    ///
-    /// A section that exceeds it is rejected while it is decoded, so the
-    /// budget bounds the memory one field section can cost.
     #[inline]
     fn remaining_budget(&self, stream_id: u64) -> Option<usize> {
         if self.max_field_section_size == usize::MAX {

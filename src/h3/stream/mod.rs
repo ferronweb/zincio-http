@@ -1,31 +1,8 @@
 //! HTTP/3 request stream handling (RFC 9114 Sections 4.1, 4.2 and 6.1).
 //!
-//! A request stream is a bidirectional QUIC stream that carries a single
-//! HTTP message exchange: the client's request HEADERS, body DATA and
-//! trailers, then the server's response HEADERS, DATA and trailers. This
-//! module wraps such a stream in a [`RequestStream`] that owns the frame
-//! decoder, decodes the requests' and response field sections with the
-//! connection's shared QPACK codecs, and abides by the RFC 9114 frame
-//! ordering rules:
-//!
-//! - the first frame must be HEADERS (anything else is
-//!   `H3_FRAME_UNEXPECTED`); the field section must form a valid request
-//!   with exactly the RFC 9114 Section 4.1 pseudo-headers, appearing
-//!   before any regular field
-//!   (`H3_MESSAGE_ERROR` otherwise);
-//! - DATA frames follow; then at most one trailing HEADERS frame, after
-//!   which only unknown frames may still appear
-//!   (`H3_FRAME_UNEXPECTED` otherwise);
-//! - control-plane frames (SETTINGS, GOAWAY, MAX_PUSH_ID, PUSH_PROMISE,
-//!   CANCEL_PUSH) are `H3_FRAME_UNEXPECTED` on a request stream.
-//!
-//! The response side encodes the response field section with the shared
-//! encoder (queuing its encoder-stream instructions for the control
-//! plane) and respects the peer's `SETTINGS_MAX_FIELD_SECTION_SIZE`.
-//!
-//! All methods are polling-based: the connection driver runs the request
-//! stream on its own task, and the transport's flow control shows up as
-//! `Pending`.
+//! [`RequestStream`] wraps a bidirectional QUIC stream, decodes request and
+//! response field sections with the shared QPACK codecs, and enforces the
+//! required frame order. All methods are polling-based.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -51,35 +28,23 @@ use crate::request::{field_name, is_invalid_field, parse_content_length};
 
 /// A failure on a request stream.
 ///
-/// [`StreamError::Transport`] with a `Reset`/`Stopped` error and
-/// [`StreamError::Message`] are stream-scoped: the driver abandons the
-/// stream (counting it against the connection's reset budgets). Most
-/// other variants are connection-scoped protocol errors: the driver
-/// closes the connection with [`StreamError::h3_code`].
+/// Transport resets and message errors are stream-scoped; most other
+/// variants close the connection with [`StreamError::h3_code`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StreamError {
-    /// The transport failed: the stream was reset by the peer
-    /// (`TransportError::Reset`), it stopped our sending side (`Stopped`),
-    /// or the connection closed underneath the stream.
+    /// The transport failed or the stream was reset.
     Transport(TransportError),
-    /// A malformed frame or payload (`H3_FRAME_ERROR`).
+    /// A malformed frame or payload.
     Frame,
-    /// A frame longer than this endpoint buffers (`H3_EXCESSIVE_LOAD`;
-    /// RFC 9114 Section 7.1).
+    /// A frame longer than this endpoint buffers.
     ExcessiveLoad,
-    /// An invalid message: malformed, duplicated or missing pseudo-headers,
-    /// a field section that violates RFC 9114 Section 4.1, or trailers
-    /// with pseudo-headers (`H3_MESSAGE_ERROR`).
+    /// An invalid message or pseudo-header set.
     Message,
-    /// A frame that is not permitted on a request stream
-    /// (`H3_FRAME_UNEXPECTED`).
+    /// A frame that is not permitted on a request stream.
     FrameUnexpected,
-    /// The peer's QPACK encoder stream state made a field section
-    /// undecodable (RFC 9204 Section 6).
+    /// The peer's QPACK state made a field section undecodable.
     Qpack(QpackError),
-    /// An encoded field section larger than the peer's announced
-    /// `SETTINGS_MAX_FIELD_SECTION_SIZE`; the peer will likely refuse it
-    /// (RFC 9114 Sections 4.2.2 and 7.2.4.1).
+    /// An encoded field section exceeds the peer's advertised limit.
     HeadersTooBig { size: u64, limit: u64 },
 }
 
@@ -139,48 +104,28 @@ fn map_frame_error(err: FrameError) -> StreamError {
     }
 }
 
-/// The connection's QPACK codecs plus the state they exchange with the
-/// control plane and the request streams.
-///
-/// One instance per connection: the control plane ([`super::control`])
-/// feeds the peer's encoder stream into the decoder and drains
-/// [`SharedCodecs::encoder_stream`] onto the QPACK encoder stream; every
-/// request stream decodes and encodes through the same instances, so
-/// dynamic table state stays coherent across the connection.
-///
-/// `decoder` and `encoder` are split into separate `Mutex`es so that
-/// `poll_send_response` (encoder) and `decode_block` (decoder) do not
-/// convoy on a single lock at high throughput.
+/// The connection's QPACK codecs and the state exchanged with the control
+/// plane.
 #[derive(Debug)]
 pub(crate) struct SharedCodecs {
-    /// Decoder for the peer's field sections, sized by our own SETTINGS.
+    /// Decoder for the peer's field sections.
     pub(crate) decoder: Mutex<Decoder>,
-    /// Encoder for our field sections, created once the peer's SETTINGS
-    /// bound its dynamic table; `None` before that (RFC 9204 Section 5).
+    /// Encoder for our field sections; `None` until the peer's SETTINGS
+    /// arrive.
     pub(crate) encoder: Mutex<Option<Encoder>>,
-    /// Encoder stream instructions (RFC 9204 Section 4.2) queued by the
-    /// send path; the control plane writes them on the QPACK encoder
-    /// stream.
+    /// Encoder stream instructions queued by the send path.
     pub(crate) encoder_stream: Mutex<VecDeque<Bytes>>,
-    /// Field sections the peer's encoder stream unblocked, per stream.
-    /// Each stream's sections are queued in arrival order; `take_unblocked_for`
-    /// pops the oldest for that stream in O(1).
+    /// Field sections unblocked by the peer's encoder stream, per stream.
     pub(crate) unblocked: Mutex<FxHashMap<u64, VecDeque<UnblockedSection>>>,
-    /// The peer's `SETTINGS_MAX_FIELD_SECTION_SIZE` once its SETTINGS
-    /// frame arrived; `None` means unlimited.
+    /// The peer's `SETTINGS_MAX_FIELD_SECTION_SIZE`; `None` means unlimited.
     pub(crate) peer_max_field_section_size: Mutex<Option<u64>>,
-    /// This endpoint's advertised limit, which request streams' frame
-    /// decoders enforce before buffering.
+    /// This endpoint's advertised field-section limit.
     pub(crate) local_max_field_section_size: Option<u64>,
-    /// Wakers of request-stream tasks parked on blocked QPACK sections.
-    /// Keyed by stream ID; the control plane wakes only the streams whose
-    /// sections were unblocked.
+    /// Wakers of tasks parked on blocked QPACK sections, keyed by stream ID.
     pub(crate) waiters: Mutex<FxHashMap<u64, Waker>>,
-    /// Notifier for tasks waiting for the encoder to be created (peer's
-    /// SETTINGS). `wait_for_encoder` awaits this; the control plane calls
-    /// `notify_waiters` once.
+    /// Notifies tasks waiting for the encoder to be created.
     pub(crate) encoder_notify: Notify,
-    /// Waker for connection driver (used for encoder stream pushes)
+    /// Waker for the connection driver when encoder instructions are queued.
     pub(crate) driver_waiter: Mutex<Option<Waker>>,
 }
 
@@ -192,9 +137,7 @@ impl SharedCodecs {
             local.qpack_max_table_capacity,
             local.qpack_blocked_streams as usize,
         );
-        // The decoder rejects inbound field sections larger than the limit
-        // this endpoint advertised (RFC 9114 Section 7.2.4.1); `None` means
-        // unlimited.
+        // Reject inbound field sections larger than our advertised limit.
         decoder.set_max_field_section_size(
             local
                 .max_field_section_size
@@ -228,12 +171,8 @@ impl SharedCodecs {
     }
 }
 
-/// One HTTP/3 request stream: the request/response exchange on a single
-/// bidirectional QUIC stream.
-///
-/// Owned by the connection driver, which reads the request
-/// Tracks an in-progress write so that a re-poll after a `Pending` transport
-/// drains the send buffer instead of re-encoding (which would duplicate bytes).
+/// The in-progress write, so a re-poll drains the send buffer instead of
+/// re-encoding.
 enum PendingSend {
     None,
     ResponseHeaders(StatusCode),
@@ -241,28 +180,11 @@ enum PendingSend {
     Trailers,
 }
 
-/// The largest combined size for which a frame's header and payload are
-/// coalesced into a single contiguous buffer. Coalescing turns two
-/// `poll_send` calls (and their per-call transport overhead) into one at the
-/// cost of copying the payload; beyond this size the copy is not worth it and
-/// the payload is written on its own.
-///
-/// Increased from 1024 to 16384 (quinn's max datagram/frame coalesce):
-/// 1k-16k responses incurred two copies (coalesce in `poll_write_parts` +
-/// copy into `BytesMut buf` in `quinn::Send::poll_write`). 16k covers
-/// typical small responses (<16 KiB) in one write; larger payloads
-/// stay vectored to avoid copy.
+/// Largest header-plus-payload pair coalesced into one write. Larger payloads
+/// stay vectored to avoid copying.
 const WRITE_INLINE_LIMIT: usize = 16384;
 
 /// A bidirectional HTTP/3 request stream.
-///
-/// Wraps a QUIC bidirectional stream ([`transport::BidiStream`]) and
-/// implements the HTTP/3 framing layer: reading the request
-/// ([`RequestStream::poll_headers`]), streaming the body
-/// ([`RequestStream::poll_recv_data`], [`RequestStream::poll_recv_trailers`])
-/// and writes the response ([`RequestStream::poll_send_response`],
-/// [`RequestStream::poll_send_data`], [`RequestStream::poll_send_trailers`],
-/// [`RequestStream::poll_finish`]).
 pub(crate) struct RequestStream {
     stream: Box<dyn BidiStream>,
     stream_id: u64,
@@ -287,9 +209,7 @@ pub(crate) struct RequestStream {
 }
 
 impl RequestStream {
-    /// Wraps an accepted request stream. `stream.id()` is its QUIC stream
-    /// ID, used to correlate QPACK state (blocked field sections, section
-    /// acknowledgements).
+    /// Wraps an accepted request stream.
     #[inline]
     pub(crate) fn new(
         stream: Box<dyn BidiStream>,
@@ -319,12 +239,8 @@ impl RequestStream {
         }
     }
 
-    /// Polls for the initial HEADERS frame and decodes it into the
-    /// request. `Ok(None)` when the stream ended without one.
-    ///
-    /// While the field section is blocked on a QPACK dynamic table entry,
-    /// polls `Pending`; it returns once the control plane's processing of
-    /// the peer's encoder stream unblocks it.
+    /// Polls for the initial HEADERS and decodes the request. Returns
+    /// `Ok(None)` if the stream ends first.
     #[allow(clippy::type_complexity)]
     #[inline]
     pub(crate) fn poll_headers(
@@ -371,12 +287,9 @@ impl RequestStream {
         }
     }
 
-    /// Polls for the next chunk of the request body.
-    ///
-    /// `Ok(None)` when the body is complete (the stream ended or the
-    /// trailers HEADERS frame arrived); any buffered trailers are then
-    /// available via [`RequestStream::poll_recv_trailers`]. A frame after
-    /// the trailers is `H3_FRAME_UNEXPECTED`.
+    /// Polls for the next request body chunk. `Ok(None)` means the body is
+    /// complete; buffered trailers are then available from
+    /// [`RequestStream::poll_recv_trailers`].
     #[inline]
     pub(crate) fn poll_recv_data(
         &mut self,
@@ -429,10 +342,7 @@ impl RequestStream {
         }
     }
 
-    /// Polls for the request's trailers, decoded into a `HeaderMap`.
-    ///
-    /// `Ok(None)` when there were none. Any known frame after the trailers
-    /// is `H3_FRAME_UNEXPECTED` (RFC 9114 Section 4.1).
+    /// Polls for the request trailers. `Ok(None)` when there were none.
     #[inline]
     pub(crate) fn poll_recv_trailers(
         &mut self,
@@ -481,22 +391,16 @@ impl RequestStream {
                 Err(err) => Poll::Ready(Err(err)),
             },
             Some(Frame::Data(_)) => {
-                // Data after the body was reported over: the caller
-                // polled trailers before the body was done, or the
-                // peer violated the frame ordering.
+                // DATA after the body was reported complete is an ordering
+                // violation.
                 Poll::Ready(Err(StreamError::FrameUnexpected))
             }
             Some(_) => Poll::Ready(Err(StreamError::FrameUnexpected)),
         }
     }
 
-    /// Writes the response: the HEADERS frame for `status` and `headers`.
-    ///
-    /// The field section is encoded with the shared encoder (queuing its
-    /// encoder-stream instructions) and must fit the peer's
-    /// `SETTINGS_MAX_FIELD_SECTION_SIZE`. Informational responses (1xx:
-    /// 100 Continue, 103 Early Hints) may precede the final one; only one
-    /// final response may be sent.
+    /// Writes the response HEADERS. Informational responses may precede the
+    /// final one; a second final response is invalid.
     #[inline]
     pub(crate) fn poll_send_response(
         &mut self,
@@ -656,13 +560,10 @@ impl RequestStream {
             .map_err(StreamError::Transport)
     }
 
-    /// Encodes a field section with the shared encoder, enforces the peer's
-    /// field-section size limit, and returns the HEADERS frame header plus
-    /// its field section as separate byte ranges. Keeping the body separate
-    /// lets the transport write the QPACK output without copying it again.
+    /// Encodes a field section and returns the HEADERS header and block as
+    /// separate byte ranges, avoiding a copy in the transport.
     #[inline]
     fn encode_headers(&mut self, lines: &[(Bytes, Bytes)]) -> Result<(Bytes, Bytes), StreamError> {
-        // Max field section size would be of decoded (name + value + 32B overhead)
         let size = lines.iter().fold(0u64, |acc, (k, v)| {
             acc + k.len() as u64 + v.len() as u64 + 32
         });
@@ -702,24 +603,17 @@ impl RequestStream {
             .map_err(StreamError::Qpack)
     }
 
-    /// Marks the stream's receive side complete: the peer ended its send
-    /// side, so no further field sections can arrive on this stream. The
-    /// decoder's per-stream field-section budget for it is released.
-    ///
-    /// Only the peer's stream end triggers this, so every field section of
-    /// the stream (headers, trailers) has decoded by now; a blocked
-    /// section would have suspended frame reads before the end was
-    /// observable.
+    /// Marks the receive side complete and releases the stream's
+    /// field-section budget.
     #[inline]
     fn finish_recv(&mut self) {
         self.recv_finished = true;
         self.shared.decoder.lock().stream_finished(self.stream_id);
     }
 
-    /// After the trailers, reads and discards unknown frames; a known
-    /// frame is `H3_FRAME_UNEXPECTED` (RFC 9114 Section 4.1).
+    /// After trailers, discards unknown frames and rejects known ones.
     ///
-    /// `Ok(Some(()))` when the stream ended cleanly after the trailers.
+    /// Returns `Some(())` when the stream ends cleanly.
     #[inline]
     fn poll_after_trailers(
         &mut self,
@@ -738,16 +632,13 @@ impl RequestStream {
         }
     }
 
-    /// Reads frames until one is available (buffering chunks into the
-    /// frame decoder, the way a real transport delivers them). A stream
-    /// that ends mid-frame is `H3_FRAME_ERROR`.
+    /// Reads frames until one is available. A stream ending mid-frame is a
+    /// frame error.
     #[inline]
     fn poll_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Frame>, StreamError>> {
         loop {
-            // RFC 9114 Sections 7.2.3-7.2.7: control-plane frames (CANCEL_PUSH,
-            // SETTINGS, PUSH_PROMISE, GOAWAY, MAX_PUSH_ID) MUST NOT appear on a
-            // request stream and are H3_FRAME_UNEXPECTED — even when malformed,
-            // so reject them at the type level before the decoder parses them.
+            // Control-plane frames are rejected before parsing, even when
+            // malformed (RFC 9114 Sections 7.2.3-7.2.7).
             if let Some(ty) = self.frame_decoder.peek_frame_type() {
                 if matches!(
                     ty,
@@ -797,10 +688,7 @@ impl RequestStream {
         Poll::Ready(Ok(()))
     }
 
-    /// Queues two adjacent byte ranges before draining. HTTP/3 frame headers
-    /// are tiny while DATA and QPACK field sections can be large. A small
-    /// pair is coalesced into one contiguous buffer so the transport sees a
-    /// single write; a large payload stays separate to avoid copying it.
+    /// Queues two byte ranges, coalescing small pairs into one write.
     #[inline]
     fn poll_write_parts(
         &mut self,
@@ -865,15 +753,8 @@ fn now() -> u64 {
         .as_nanos() as u64
 }
 
-/// Builds an `http::Request` from a decoded field section, enforcing the
-/// RFC 9114 Section 4.1 pseudo-header rules:
-///
-/// - pseudo-headers must precede all regular fields;
-/// - duplicate pseudo-headers and unknown ones are `H3_MESSAGE_ERROR`;
-/// - `:method`, `:scheme` and `:path` are required (except CONNECT, which
-///   requires only `:authority`, plus `:scheme` and `:protocol` for an
-///   extended CONNECT; a plain CONNECT must not carry `:scheme`/`:path`);
-/// - `:protocol` is only valid on CONNECT requests (RFC 9220).
+/// Builds an `http::Request` from a decoded field section, enforcing RFC
+/// 9114 Section 4.1 pseudo-header rules.
 #[inline]
 fn build_request(
     headers: Vec<(Bytes, Bytes)>,
@@ -956,9 +837,7 @@ fn build_request(
         .body(())
         .expect("validated parts build a request");
     for (name, value) in regular {
-        // `try_append` reports the header map's capacity instead of
-        // panicking: a field section can carry more distinct names than the
-        // map holds, and the size budget alone does not rule that out.
+        // `try_append` reports capacity exhaustion instead of panicking.
         if request.headers_mut().try_append(name, value).is_err() {
             return Err(StreamError::Message);
         }
@@ -1006,9 +885,7 @@ fn build_uri(
     }
     let scheme = scheme.as_ref().expect("scheme validated");
     let path = path.as_ref().expect("path validated");
-    // Assemble the URI from validated parts rather than `format!` + a full
-    // URI string parse: the builder converts each part once and skips the
-    // combined-string allocation.
+    // Build the URI from validated parts, avoiding a combined-string parse.
     match authority {
         Some(authority) => Uri::builder()
             .scheme(String::from_utf8_lossy(scheme).as_ref())

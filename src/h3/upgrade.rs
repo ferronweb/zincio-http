@@ -1,15 +1,8 @@
-//! HTTP/3 request-stream upgrade to raw bidirectional I/O (CONNECT /
-//! WebTransport-style handoff).
+//! HTTP/3 request-stream upgrade to raw bidirectional I/O.
 //!
-//! After the server sends its final response, the application may take the
-//! underlying request stream over as raw [`tokio::io`] I/O. The request
-//! stream is shared with the driver through an async [`tokio::sync::Mutex`],
-//! so the receive half becomes an [`AsyncRead`] (`H3Upgraded`) while the
-//! send half keeps writing through the same handle, driven by the
-//! [`UpgradedSendStreamTask`] until the other side hangs up.
-//!
-//! The pattern (a bounded kanal bridge plus an error oneshot) mirrors the
-//! original `hyper`/`h3` upgrade implementation.
+//! After the final response, the application may take over the request stream
+//! as [`tokio::io`] I/O. Reads and writes share the stream through an async
+//! mutex.
 
 use std::{
     future::Future,
@@ -27,13 +20,7 @@ use crate::h3::h3_stream_error_to_io;
 use crate::h3::stream::{RequestStream, StreamError};
 use crate::upgrade_bridge::UpgradedSendStreamBridge;
 
-/// Splits a shared request stream into read and write halves for an
-/// upgraded connection.
-///
-/// The returned `H3Upgraded` reads the remaining request body (and any
-/// bytes the peer keeps sending) through the stream's receive path; the
-/// returned task writes the consumer's output on the send path until the
-/// consumer closes it.
+/// Splits a shared request stream into read and write halves.
 #[inline]
 pub(super) fn pair(inner: Arc<Mutex<RequestStream>>) -> (H3Upgraded, UpgradedSendStreamTask) {
     let (send_stream, rx, error_tx) = UpgradedSendStreamBridge::channel();
@@ -68,8 +55,7 @@ impl tokio::io::AsyncRead for H3Upgraded {
         cx: &mut Context<'_>,
         read_buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        // The request may not have been fully read when the upgrade happened;
-        // drain whatever the stream still holds as raw bytes.
+        // Drain any request bytes left in the stream as raw I/O.
         if self.buf.is_empty() {
             self.buf = loop {
                 let mut guard = match std::pin::pin!(self.inner.lock()).poll_unpin(cx) {

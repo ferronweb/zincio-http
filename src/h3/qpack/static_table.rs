@@ -1,17 +1,7 @@
 //! QPACK static table (RFC 9204 Appendix A).
 //!
-//! The static table is identical for every connection and never changes. It
-//! contains the 99 most common header fields as measured on real Internet
-//! traffic; entries are indexed from 0, and the table is optimized so the
-//! most common fields encode in the fewest bytes.
-//!
-//! Field names and values are stored verbatim from the RFC: names are
-//! lowercase ASCII (encoders MUST only reference an entry when both name and
-//! value match exactly), and values preserve their exact byte case
-//! (e.g. `:method` values are uppercase).
-//!
-//! The lookup functions are consumed by the QPACK encoder (`find`,
-//! `find_name`) and decoder (`get`).
+//! The 99 entries are identical for every connection. Names are lowercase
+//! ASCII and values preserve their exact bytes from the RFC.
 
 /// Number of entries in the static table (indices `0..99`).
 pub(crate) const STATIC_TABLE_SIZE: usize = 99;
@@ -128,20 +118,13 @@ const STATIC_TABLE: [(&[u8], &[u8]); STATIC_TABLE_SIZE] = [
     (b"x-frame-options", b"sameorigin"),
 ];
 
-/// Returns the `(name, value)` pair of the static table entry at `index`.
-///
-/// Returns `None` when `index` is out of range (>= 99).
+/// Returns the static table entry at `index`.
 #[inline]
 pub(crate) fn get(index: usize) -> Option<(&'static [u8], &'static [u8])> {
     STATIC_TABLE.get(index).copied()
 }
 
-/// Returns the index of the first entry whose name **and** value match
-/// `name` and `value` exactly.
-///
-/// An entry may only be referenced when both the field name and value match
-/// the header field being encoded (RFC 9204 Section 2.1.1). The input name
-/// must be lowercase, matching the table.
+/// Returns the index of the first exact `(name, value)` match.
 #[cfg(test)]
 #[inline]
 pub(crate) fn find(name: &[u8], value: &[u8]) -> Option<usize> {
@@ -150,9 +133,7 @@ pub(crate) fn find(name: &[u8], value: &[u8]) -> Option<usize> {
         .position(|&(table_name, table_value)| table_name == name && table_value == value)
 }
 
-/// Finds an exact match and, when no exact match exists, the lowest-indexed
-/// name match in one pass. QPACK encoders need both answers for most literal
-/// fields, so combining them avoids a second 99-entry linear scan.
+/// Finds an exact match and the lowest-indexed name match in one pass.
 #[inline]
 pub(crate) fn find_full_or_name(name: &[u8], value: &[u8]) -> (Option<usize>, Option<usize>) {
     let mut name_match = None;
@@ -168,11 +149,7 @@ pub(crate) fn find_full_or_name(name: &[u8], value: &[u8]) -> (Option<usize>, Op
     (None, name_match)
 }
 
-/// Returns the index of the first entry whose name matches `name`.
-///
-/// Used to encode a field line with a name reference to the static table
-/// when no entry matches the full value. The lowest index is returned, which
-/// the encoder is free to choose (RFC 9204 Section 4.5.1).
+/// Returns the index of the first entry whose name matches.
 #[inline]
 pub(crate) fn find_name(name: &[u8]) -> Option<usize> {
     STATIC_TABLE

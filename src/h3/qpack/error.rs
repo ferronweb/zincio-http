@@ -1,35 +1,22 @@
 //! QPACK error codes (RFC 9114 Section 8.1, reused by RFC 9204 Section 6).
-//!
-//! The QPACK error family is `0x02xx`: these codes are carried in
-//! CONNECTION_CLOSE frames by the HTTP/3 layer, which maps them here.
 
 /// Errors raised while QPACK state is inconsistent or a representation is
-/// malformed.
-///
-/// `DecompressionFailed` is produced by field section decoding, the other
-/// two by processing of the peer's respective QPACK stream. All three are
-/// fatal for the connection: there is no way to resynchronize.
+/// malformed. All are fatal for the connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QpackError {
     /// `QPACK_DECOMPRESSION_FAILED` (0x0200): a field section could not be
-    /// decoded, or references an entry that is evicted or out of range, or
-    /// exceeds the advertised `SETTINGS_MAX_FIELD_SECTION_SIZE`.
+    /// decoded or exceeded the advertised size limit.
     DecompressionFailed,
     /// `QPACK_ENCODER_STREAM_ERROR` (0x0201): an encoder stream instruction
     /// was malformed or violated table constraints.
     EncoderStream,
     /// `QPACK_DECODER_STREAM_ERROR` (0x0202): a decoder stream instruction
-    /// was malformed. Kept so [`QpackError::code`] mirrors the full error
-    /// family; this implementation only *emits* decoder stream instructions,
-    /// it never parses them, so the variant is never constructed.
+    /// was malformed.
     DecoderStream,
 }
 
 impl QpackError {
     /// The HTTP/3 CONNECTION_CLOSE error code (RFC 9204 Section 6).
-    ///
-    /// Consumed by the HTTP/3 layer and by the error-module tests that
-    /// pin the `0x02xx` family against the `0x01xx` HTTP/3 family.
     #[inline]
     pub fn code(self) -> u16 {
         match self {

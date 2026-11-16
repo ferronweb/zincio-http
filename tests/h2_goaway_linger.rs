@@ -1,8 +1,7 @@
 //! After the client's GOAWAY the server closes its side and reads what the client still
-//! sends until the client closes too (a lingering close, as nginx's): closing with unread
-//! data makes the kernel reset the connection, and the client may then never see the
-//! server's last frames. On a duplex stream the reset shows as the client's late write
-//! failing.
+//! sends until the client closes too (a lingering close): closing with unread data
+//! makes the kernel reset the connection, and the client may then never see the server's
+//! last frames. On a duplex stream the reset shows as the client's late write failing.
 
 #![cfg(all(feature = "h2", feature = "unstable-internals"))]
 

@@ -1,10 +1,15 @@
-//! Interop test: drive a real `h2` client against the **native** HTTP/2 server
-//! over a real TCP socket. The server runs on the `zincio` runtime (the native
-//! connection spawns per-stream tasks via `zincio::spawn`); the `h2` client
-//! runs on its own `tokio` runtime in a separate thread. This exercises the
-//! native frame codec, preface/settings exchange, HEADERS + DATA, and flow
-//! control end to end against a reference implementation, on the same transport
-//! path the h2spec harness uses.
+//! Interop test: drive a `h2` client against `zincio-http`'s HTTP/2 server
+//! over a real TCP socket.
+//!
+//! The server runs on the `zincio` runtime, and the `h2` client
+//! runs on its own `tokio` runtime in a separate thread.
+//!
+//! This covers the frame codec, preface/settings exchange, HEADERS + DATA,
+//! and flow control end to end against a reference implementation, on the
+//! same transport path the h2spec script uses.
+//!
+//! In the `zincio-http` repository, there is "interop" directory containing
+//! a test setup that is used to test interop with more HTTP/2 clients.
 
 #![cfg(feature = "h2")]
 

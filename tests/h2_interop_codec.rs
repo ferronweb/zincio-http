@@ -1,8 +1,4 @@
-//! Interop test: drive a real `h2` client and server over in-memory
-//! duplex streams, tap the wire bytes in both directions, and verify
-//! that the native frame codec (`zincio_http::h2::codec`) decodes the
-//! complete session, including the connection preface, settings
-//! exchange, DATA, and GOAWAY frames.
+//! Interop test + codec verification
 
 #![cfg(all(feature = "h2", feature = "unstable-internals"))]
 
@@ -26,10 +22,7 @@ impl Capture {
     }
 }
 
-/// A transport half that records everything written through it. Each
-/// `Tapped` wraps one end of the duplex pair and logs the bytes its
-/// side writes, so the two captures together hold the full wire log of
-/// the session.
+/// A transport half that records everything written through it.
 struct Tapped {
     inner: tokio::io::DuplexStream,
     log: Capture,
@@ -181,8 +174,7 @@ async fn real_h2_session_frames_decode() {
         .expect("server task failed");
 
     // The client's byte stream starts with the connection preface (which
-    // the frame codec itself never sees — the connection layer consumes
-    // it), followed by its initial SETTINGS.
+    // the frame codec itself never sees), followed by its initial SETTINGS.
     let c2s = log_c2s.bytes();
     assert!(c2s.starts_with(CLIENT_PREFACE), "missing client preface");
     let client_frames = decode_all(&c2s[CLIENT_PREFACE.len()..]);

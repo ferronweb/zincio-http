@@ -1,16 +1,15 @@
-//! Interop test: real `h3` client (over quinn) and a raw quinn fixture
-//! client against the **native** HTTP/3 server over a real QUIC loopback
+//! Interop test: a `h3` client (over quinn) and a raw quinn fixture
+//! client against `zincio-http`'s HTTP/3 server over a QUIC loopback
 //! connection.
 //!
-//! The server runs on the `zincio` runtime in its own thread (the native
-//! driver spawns per-request tasks via `zincio::spawn`); both quinn
-//! endpoints live on the `tokio` runtime of the test thread, which pumps
-//! the loopback. The `h3`-crate scenarios exercise request/response
-//! streaming, trailers, concurrency, cancellation and graceful shutdown
-//! against the reference implementation; the fixture-client scenarios pin
-//! wire behavior (control/QPACK streams, SETTINGS, `100 Continue` and
-//! `103 Early Hints` interims, a CONNECT request without `:scheme`/
-//! `:path`) with hand-crafted frames.
+//! The server runs on the `zincio` runtime in its own thread, while
+//! both quinn endpoints live on the `tokio` runtime of the test thread.
+//!
+//! This covers request/response streaming, trailers, concurrency, cancellation
+//! and graceful shutdown against the reference implementation.
+//!
+//! In the `zincio-http` repository, there is "interop" directory containing
+//! a test setup that is used to test interop with more HTTP/3 clients.
 
 #![cfg(feature = "h3-quinn")]
 
@@ -79,7 +78,7 @@ async fn loopback_pair() -> (Endpoint, Endpoint, quinn::Connection, quinn::Conne
 
 /// Runs the native server on a `zincio` runtime in a dedicated thread.
 ///
-/// The server is shut down by cancelling `cancel`; the thread then exits
+/// The server is shut down by cancelling `cancel`. The thread then exits
 /// once the connection drains, and `handle`'s result is sent on the
 /// returned channel.
 fn spawn_native_server<F, Fut, ResB, ResBE, ResE>(
@@ -157,11 +156,7 @@ fn write_varint(dst: &mut BytesMut, value: u64) {
     }
 }
 
-/// A raw quinn client that speaks HTTP/3 at the frame level: it opens the
-/// control, QPACK encoder and decoder streams with their preludes and
-/// SETTINGS, then sends hand-encoded request HEADERS/DATA on request
-/// streams. The QPACK codecs are this crate's own, so the fixture pins the
-/// wire behavior of the native implementation end to end.
+/// A raw quinn client that speaks HTTP/3 at the frame level.
 struct Fixture {
     conn: quinn::Connection,
     encoder: Encoder,
@@ -265,9 +260,7 @@ impl Fixture {
     }
 
     /// Accepts whatever unidirectional streams the server has opened so far
-    /// and routes them: the QPACK encoder stream (type 0x02) is retained and
-    /// fed to `decoder` by [`Self::feed_server_encoder`]; control, decoder,
-    /// push and unknown streams are drained and dropped.
+    /// and routes them.
     async fn pump_server_unis(&mut self) {
         loop {
             let accept =
@@ -338,11 +331,8 @@ impl Fixture {
             self.flush_acks().await;
             return headers;
         }
-        // The block was buffered as blocked. Pump the server's encoder
-        // stream: `feed_encoder_stream` unblocks and decodes the section
-        // exactly once (and the decoder queues its Section Acknowledgment),
-        // so we return that result instead of re-decoding the block, which
-        // would re-acknowledge the same section and abort the connection.
+        // The block was buffered as blocked, so pump the server's encoder
+        // stream.
         loop {
             if self.server_encoder.is_none() {
                 self.pump_server_unis().await;
@@ -740,11 +730,6 @@ async fn h3_client_goaway_graceful_shutdown() {
     .expect("h3_client_goaway_graceful_shutdown timed out");
 }
 
-/// A connection left idle past `accept_timeout` is shut down gracefully
-/// (GOAWAY, then `H3_NO_ERROR`) and `handle` returns. The drain-grace wait used
-/// to `continue` inside one poll until its timer fired, but timers only fire
-/// between polls: the poll spun at 100 % CPU, re-registering stream wakers each
-/// pass (memory grew without bound), and `handle` never returned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h3_client_idle_connection_closes_after_accept_timeout() {
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -946,9 +931,7 @@ async fn fixture_client_dynamic_table_unblocks() {
                 Ok::<_, std::convert::Infallible>(
                     Response::builder()
                         .status(StatusCode::OK)
-                        // A name outside the static table: the server's
-                        // encoder must insert it and reference it, so the
-                        // response's Required Insert Count is non-zero.
+                        // It would be a dynamic table entry
                         .header("x-dyn-token", "rendered-dynamically")
                         .body(Full::new(Bytes::from(payload)))
                         .expect("response"),
@@ -1004,8 +987,7 @@ async fn fixture_client_dynamic_table_unblocks() {
 
 /// One GET against a dynamic-table-capable fixture: the response headers
 /// carry the non-static `x-dyn-token` name, so every response forces the
-/// server's encoder to emit inserts (and, from the second response on, to
-/// reference the entries it inserted for earlier responses).
+/// server's encoder to emit inserts.
 async fn dyn_exchange(fixture: &mut Fixture, path: &str, expect_token: &str) -> Vec<u8> {
     let (mut send, mut recv) = fixture
         .request_open(&pseudo(&[
@@ -1058,8 +1040,7 @@ async fn dyn_handler(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_dynamic_table_reload_and_reconnect() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        // Connection 1: the "reload" pattern — the same page twice, so the
-        // second response references the entries the first one inserted.
+        // Connection 1: the "reload" pattern
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
         let cancel = CancellationToken::new();
         let (server_thread, server_result) = spawn_native_server(
@@ -1077,10 +1058,9 @@ async fn fixture_client_dynamic_table_reload_and_reconnect() {
             dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
             b"dyn-ok /page"
         );
+
         // Shut down gracefully while the peer is still present, and drop the
-        // client only afterwards: dropping first tears down QUIC abruptly, and
-        // if the server observes the dead peer before the cancel it reports
-        // ClosedCriticalStream instead of Ok.
+        // client only afterwards, to not suddenly tear down QUIC.
         cancel.cancel();
         let result = server_result
             .recv_timeout(Duration::from_secs(10))
@@ -1089,7 +1069,7 @@ async fn fixture_client_dynamic_table_reload_and_reconnect() {
         server_thread.join().expect("join server 1");
         drop(fixture);
 
-        // Connection 2: the browser closed and reopened; the fresh
+        // Connection 2: the browser closed and reopened, so the fresh
         // connection must serve the dynamic-table response on its first
         // request.
         let (_server_ep, _client_ep, client_conn, server_conn) = loopback_pair().await;
@@ -1105,7 +1085,7 @@ async fn fixture_client_dynamic_table_reload_and_reconnect() {
             dyn_exchange(&mut fixture, "/page", "rendered-dynamically").await,
             b"dyn-ok /page"
         );
-        // Same teardown ordering as above: graceful shutdown first, drop after.
+        // Same teardown ordering as before...
         cancel.cancel();
         let result = server_result
             .recv_timeout(Duration::from_secs(10))
@@ -1293,7 +1273,7 @@ async fn fixture_client_connect() {
 
 /// Like [`dyn_handler`], but the `x-dyn-token` value is derived from the
 /// request path, so every distinct path forces the server's encoder to
-/// insert a *new* dynamic entry rather than reference an existing one.
+/// insert a new dynamic entry rather than reference an existing one.
 async fn dyn_handler_unique(
     request: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
@@ -1309,12 +1289,8 @@ async fn dyn_handler_unique(
     )
 }
 
-/// Many requests, each with a unique `x-dyn-token` value, against a *small*
-/// dynamic table. The server must keep inserting and evicting entries; with
-/// the RFC 9204 §2.1.1 fix the server evicts only acknowledged entries
-/// (the fixture acknowledges every decoded section on its decoder stream)
-/// and the connection survives. Without the fix the server would evict
-/// unacknowledged entries and a strict peer would abort the connection.
+/// Many requests, each with a unique `x-dyn-token` value, against a small
+/// dynamic table.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fixture_client_dynamic_table_eviction_pressure() {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -1326,6 +1302,7 @@ async fn fixture_client_dynamic_table_eviction_pressure() {
             cancel.clone(),
             dyn_handler_unique,
         );
+
         // A small capacity forces eviction after a handful of inserts.
         let mut fixture = Fixture::new_with_capacity(client_conn, 600, 100).await;
         let count = 200;
@@ -1369,6 +1346,7 @@ async fn fixture_client_dynamic_table_eviction_pressure() {
             );
             assert_eq!(data, format!("dyn-ok {path}").into_bytes());
         }
+
         // Same teardown ordering: graceful shutdown while the peer is present,
         // drop the client only after the server has exited.
         cancel.cancel();
@@ -1404,9 +1382,7 @@ async fn fixture_client_malformed_message_resets_stream_and_connection_survives(
         );
 
         let mut fixture = Fixture::new(client_conn).await;
-        // A request without `:method` is a malformed message: the server
-        // must abort the stream with H3_MESSAGE_ERROR, not the connection
-        // (RFC 9114 Section 4.1.2).
+        // A request without `:method` is a malformed message...
         let (mut send, mut recv) = fixture
             .request_open(&pseudo(&[
                 (":scheme", "https"),
@@ -1471,9 +1447,9 @@ async fn fixture_client_connection_specific_fields_reset_the_stream() {
         );
 
         let mut fixture = Fixture::new(client_conn).await;
+
         // Connection-specific fields make a request malformed (RFC 9114
-        // Section 4.2), and `TE` is allowed only as `trailers`: each aborts
-        // its stream with H3_MESSAGE_ERROR.
+        // Section 4.2)
         for (name, value) in [
             ("connection", "close"),
             ("keep-alive", "timeout=5"),
@@ -1551,9 +1527,8 @@ async fn fixture_client_local_error_reset_budget_closes_with_excessive_load() {
         );
 
         let mut fixture = Fixture::new(client_conn.clone()).await;
-        // Two malformed messages fit the local-reset budget; the third
-        // costs the connection: RESET_STREAM gives way to a close with
-        // H3_EXCESSIVE_LOAD (RFC 9114 Section 10.5).
+        // Two malformed messages fit the local-reset budget, but the third
+        // costs the connection
         for i in 0..3 {
             let (mut send, _recv) = fixture
                 .request_open(&pseudo(&[
@@ -1576,11 +1551,6 @@ async fn fixture_client_local_error_reset_budget_closes_with_excessive_load() {
         let result = server_result
             .recv_timeout(Duration::from_secs(10))
             .expect("server finished");
-        // The server deliberately force-closes the connection once the budget is
-        // exhausted, so `handle` returns the connection error instead of Ok
-        // (error reporting since 0.4.9). Assert it is specifically
-        // ExcessiveLoad: discarding the value would let any error -- or
-        // none at all -- pass unnoticed.
         let err = result.expect_err("expected ExcessiveLoad connection error");
         let msg = err.to_string();
         assert!(
@@ -1615,9 +1585,7 @@ async fn fixture_client_pending_accept_reset_budget_closes_with_excessive_load()
 
         let fixture = Fixture::new(client_conn.clone()).await;
         // Streams opened and terminated before any request bytes were
-        // sent never reach the handler: they churn through the
-        // pending-accept budget (RFC 9114 Sections 4.1.2, 10.5), and the
-        // third one costs the connection.
+        // sent never reach the handler
         for _ in 0..3 {
             let (mut send, _recv) = fixture.conn.open_bi().await.expect("open request stream");
             let _ = send.reset(0x010cu32.into()); // H3_REQUEST_CANCELLED
@@ -1634,8 +1602,6 @@ async fn fixture_client_pending_accept_reset_budget_closes_with_excessive_load()
         let result = server_result
             .recv_timeout(Duration::from_secs(10))
             .expect("server finished");
-        // Same reasoning as the local-error budget above: the forced close is
-        // expected to surface as an ExcessiveLoad connection error.
         let err = result.expect_err("expected ExcessiveLoad connection error");
         let msg = err.to_string();
         assert!(

@@ -1,8 +1,7 @@
 //! HPACK fixture corpus: parsing and checks.
 //!
-//! Story files live in `tests/fixtures/hpack/stories/` — see the
-//! `README.md` there for provenance and format. Decoder/encoder tests
-//! that consume the corpus are added by the HPACK implementation commits.
+//! Story files live in `tests/fixtures/hpack/stories/`, see its
+//! `README.md` for more information.
 
 #![cfg(all(feature = "h2", feature = "unstable-internals"))]
 
@@ -150,10 +149,11 @@ fn corpus_parses() {
     );
 }
 
-/// Decodes every fixture case; all cases in a story share one compression
-/// context (dynamic table state carries across cases in order), and a
-/// case's `header_table_size` is applied as the protocol maximum before
-/// that case.
+/// Decodes every fixture case.
+///
+/// All cases in a story share one compression context (dynamic table
+/// state carries across cases in order), and a case's `header_table_size`
+/// is applied as the protocol maximum before that case.
 #[test]
 fn corpus_decodes() {
     let mut failed = Vec::new();
@@ -207,10 +207,7 @@ fn corpus_decodes() {
 ///
 /// The corpus wires come from three encoder implementations with
 /// different policies (indexing and Huffman choices), so the encoder
-/// side is checked semantically, not byte-for-byte: each case's headers
-/// are encoded with a warm encoder (dynamic table state carries across
-/// cases in order), then decoded and compared to the expected list. A
-/// case's `header_table_size` is queued on both sides before that case.
+/// side is checked semantically, not byte-for-byte.
 #[test]
 fn corpus_encode_round_trips() {
     let mut failed = Vec::new();

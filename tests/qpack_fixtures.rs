@@ -1,10 +1,7 @@
 //! QPACK fixture corpus: parsing and checks.
 //!
-//! Story files live in `tests/fixtures/qpack/stories/` — see the
-//! `README.md` there for provenance and format. The decoder test replays
-//! each story against a real decoder; the encoder test encodes the expected
-//! headers with this crate's encoder and round-trips them through a
-//! decoder. Gated on `--features h3`, which owns the QPACK module.
+//! Story files live in `tests/fixtures/qpack/stories/`, see its
+//! `README.md` for more information.
 
 #![cfg(all(feature = "h3", feature = "unstable-internals"))]
 

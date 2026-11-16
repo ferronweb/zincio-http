@@ -3,16 +3,8 @@
 //! High-performance HTTP/1.1, HTTP/2, and HTTP/3 server implementation
 //! for the [`zincio`] async runtime.
 //!
-//! `zincio-http` provides protocol-specific connection handlers behind a common
-//! [`HttpProtocol`] trait. Handlers receive an `http::Request<`[`Incoming`]`>`
-//! and return an `http::Response<B>` where `B` implements
-//! [`http_body::Body`] with `bytes::Bytes` chunks.
-//!
-//! ## Feature highlights
-//!
-//! - **Zero-copy static file serving** - supports zero-copy response sending for static file serving on Linux and FreeBSD.
-//! - **100 Continue** - Supports automatically sending `100 Continue` before the final response.
-//! - **103 Early Hints** - Supports sending `103 Early Hints` before the final response.
+//! `zincio-http` provides HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 server implementations on top
+//! of the `zincio` asynchronous Rust runtime.
 //!
 //! ## Feature flags
 //!
@@ -20,11 +12,7 @@
 //! - `h2`: Enables HTTP/2 support.
 //! - `h3`: Enables HTTP/3 support.
 //! - `h1-zerocopy`: Enables Linux and FreeBSD-only zero-copy response sending for HTTP/1.x.
-//!
-//! ## Early hints
-//!
-//! Use [`send_early_hints`] from a request handler to send `103 Early Hints`
-//! before the final response.
+//! - `h3-quinn`: Enables [`quinn`] adapter for the HTTP/3 support.
 //!
 //! ## Example
 //!

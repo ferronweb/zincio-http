@@ -1,11 +1,3 @@
-//! Large dynamic-table QPACK benchmarks.
-//!
-//! Pre-populates the encoder's dynamic table with `N` distinct entries, then
-//! re-encodes the same `N` headers (all cache hits) so the timed path runs
-//! `DynamicTable::find_full_or_name` against a large table. This isolates
-//! lookup cost: the linear scan (baseline) scales with `N`, while the hash map
-//! (optimized) stays O(1).
-
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use zincio_http::qpack::Encoder;

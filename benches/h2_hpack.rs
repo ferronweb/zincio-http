@@ -1,12 +1,3 @@
-//! Criterion benchmarks for the native HPACK codec.
-//!
-//! These exercise the hot paths of request/response header processing:
-//! encoding a typical header set and decoding the resulting block. Run with
-//!
-//! ```sh
-//! cargo bench --features h2 --bench h2_hpack
-//! ```
-
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
 use zincio_http::hpack::{Decoder, Encoder, Header};

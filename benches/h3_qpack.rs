@@ -1,16 +1,3 @@
-//! Criterion benchmarks for the native QPACK codec.
-//!
-//! These exercise the hot paths of HTTP/3 header processing: encoding a
-//! realistic header set and decoding the resulting field section. The
-//! encoder stream produced alongside each block is fed to a fresh decoder
-//! first, so the decode measurement reflects a real (self-contained) round
-//! trip rather than an empty table. Table sizes 0 / 512 / 4096 bracket the
-//! dynamic-table range, and both Huffman on/off are covered. Run with
-//!
-//! ```sh
-//! cargo bench --features h3 --bench h3_qpack
-//! ```
-
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
 use zincio_http::qpack::{Decoder, Encoder};

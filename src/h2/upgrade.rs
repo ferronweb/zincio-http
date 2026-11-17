@@ -215,6 +215,9 @@ impl UpgradedSendStreamTask {
             match std::pin::pin!(rx_fut).poll(cx) {
                 Poll::Ready(Ok(cursor)) => {
                     this.rx_fut = None;
+                    if cursor.is_empty() {
+                        continue; // Nothing to send...
+                    }
                     let msg = super::stream::StreamMsg::Data {
                         data: Bytes::from_owner(cursor),
                         end_stream: false,

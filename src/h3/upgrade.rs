@@ -179,6 +179,9 @@ impl UpgradedSendStreamTask {
             match std::pin::pin!(rx_fut).poll(cx) {
                 Poll::Ready(Ok(cursor)) => {
                     this.rx_fut = None;
+                    if cursor.is_empty() {
+                        continue; // Nothing to send...
+                    }
                     this.send_fut = Some(Box::pin(Self::send_data(
                         Arc::clone(&this.inner),
                         Bytes::from_owner(cursor),

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::{Method, Request, Response, StatusCode};
+use tokio::io::AsyncWriteExt;
 use zincio_http::{Http2, Http2Options, HttpProtocol, Incoming, Protocol};
 
 #[test]
@@ -118,6 +119,116 @@ fn websocket_over_h2_reaches_the_handler_and_tunnels_both_ways() {
                     Some(chunk) => assert!(chunk.unwrap().is_empty(), "nothing after the end"),
                 }
             }
+            drop((client, server));
+        });
+}
+
+#[test]
+fn websocket_over_h2_server_initiated_message_passes() {
+    zincio::RuntimeBuilder::new()
+        .enable_timer(true)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(1 << 16);
+            let server = zincio::spawn(async move {
+                Http2::new(
+                    server_io,
+                    Http2Options::default().enable_connect_protocol(true),
+                )
+                .handle(|mut request: Request<Incoming>| async move {
+                    let protocol = request.extensions().get::<Protocol>().cloned();
+                    let target = (request.method().clone(), request.uri().clone());
+                    let valid = protocol.as_ref().map(Protocol::as_str) == Some("websocket")
+                        && target.0 == Method::CONNECT
+                        && target.1.path() == "/chat"
+                        && target.1.query() == Some("room=1")
+                        && target.1.host() == Some("example.com");
+                    // An echo: what the client sends comes back as it arrives.
+                    if !valid {
+                        return Ok::<_, std::io::Error>(
+                            Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(http_body_util::Empty::new())
+                                .unwrap(),
+                        );
+                    }
+
+                    let upgrade = zincio_http::prepare_upgrade(&mut request);
+                    zincio::spawn(async move {
+                        let mut upgraded = upgrade.unwrap().await.unwrap();
+
+                        // 1024 packets with 32768 bytes each
+                        for _ in 0..1024 {
+                            let packet = [0x20u8; 32768];
+                            let _ = upgraded.write_all(&packet).await;
+                        }
+                    });
+
+                    Ok::<_, std::io::Error>(
+                        Response::builder()
+                            .status(StatusCode::SWITCHING_PROTOCOLS)
+                            .body(http_body_util::Empty::new())
+                            .unwrap(),
+                    )
+                })
+                .await
+            });
+
+            let (client, connection) = h2::client::handshake(client_io).await.unwrap();
+            zincio::spawn(async move {
+                let _ = connection.await;
+            });
+            let mut client = client.ready().await.unwrap();
+            // The server's SETTINGS (with ENABLE_CONNECT_PROTOCOL) arrive after the
+            // handshake future resolves.
+            for _ in 0..100 {
+                if client.is_extended_connect_protocol_enabled() {
+                    break;
+                }
+                zincio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(client.is_extended_connect_protocol_enabled());
+
+            let mut request = Request::builder()
+                .method(Method::CONNECT)
+                .uri("https://example.com/chat?room=1")
+                .body(())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(h2::ext::Protocol::from_static("websocket"));
+            let (response, _up) = client.send_request(request, false).unwrap();
+            let response = zincio::time::timeout(Duration::from_secs(5), response)
+                .await
+                .expect("the response head comes before any tunnel data")
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut down = response.into_body();
+
+            // 32768 bytes per packet * 1024 packets filled with 0x20
+            let data_len = 32768 * 1024;
+            let mut recv_data = 0;
+            while recv_data < data_len {
+                let chunk = zincio::time::timeout(Duration::from_secs(1), down.data())
+                    .await
+                    .unwrap_or_else(|_| panic!("timed out, received {recv_data} out of {data_len}"))
+                    .expect("frame arrives")
+                    .expect("frame arrives successfully");
+                assert!(chunk.len() <= data_len - recv_data, "chunk too large");
+                recv_data += chunk.len();
+                assert!(chunk.iter().all(|b| *b == 0x20), "invalid chunks");
+
+                // Without that, the stream would stall!
+                down.flow_control()
+                    .release_capacity(chunk.len())
+                    .expect("failed to release recv window capacity");
+            }
+            assert_eq!(
+                recv_data, data_len,
+                "not enough data received (some chunks lost?)"
+            );
+
             drop((client, server));
         });
 }

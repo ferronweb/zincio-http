@@ -334,9 +334,9 @@ name = "interop-driver-neqo"
 version = "0.0.0"
 dependencies = [
  "http",
- "neqo-common",
+ "neqo-common 0.35.0",
  "neqo-http3",
- "neqo-transport",
+ "neqo-transport 0.35.0",
  "nss-rs",
  "sha2",
 ]
@@ -404,6 +404,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mtu"
+version = "0.4.1"
+source = "git+https://github.com/mozilla/neqo?tag=v0.36.0#e1666352c12a249dacb37927643985e76b7936c1"
+dependencies = [
+ "cfg_aliases",
+ "libc",
+ "windows",
+]
+
+[[package]]
 name = "neqo-common"
 version = "0.35.0"
 source = "git+https://github.com/mozilla/neqo?tag=v0.35.0#b500964cf4b7a39cceb029b8186123c58018dc19"
@@ -422,15 +432,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "neqo-common"
+version = "0.36.0"
+source = "git+https://github.com/mozilla/neqo?tag=v0.36.0#e1666352c12a249dacb37927643985e76b7936c1"
+dependencies = [
+ "enum-map",
+ "libc",
+ "log",
+ "mach2",
+ "qlog",
+ "serde",
+ "strum",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "windows",
+]
+
+[[package]]
 name = "neqo-http3"
-version = "0.35.0"
-source = "git+https://github.com/mozilla/neqo?tag=v0.35.0#b500964cf4b7a39cceb029b8186123c58018dc19"
+version = "0.36.0"
+source = "git+https://github.com/mozilla/neqo?tag=v0.36.0#e1666352c12a249dacb37927643985e76b7936c1"
 dependencies = [
  "enumset",
  "http",
- "neqo-common",
+ "neqo-common 0.36.0",
  "neqo-qpack",
- "neqo-transport",
+ "neqo-transport 0.36.0",
  "nss-rs",
  "qlog",
  "rustc-hash",
@@ -442,11 +470,11 @@ dependencies = [
 
 [[package]]
 name = "neqo-qpack"
-version = "0.35.0"
-source = "git+https://github.com/mozilla/neqo?tag=v0.35.0#b500964cf4b7a39cceb029b8186123c58018dc19"
+version = "0.36.0"
+source = "git+https://github.com/mozilla/neqo?tag=v0.36.0#e1666352c12a249dacb37927643985e76b7936c1"
 dependencies = [
- "neqo-common",
- "neqo-transport",
+ "neqo-common 0.36.0",
+ "neqo-transport 0.36.0",
  "rustc-hash",
  "thiserror",
  "tracing",
@@ -460,8 +488,29 @@ dependencies = [
  "enum-map",
  "enumset",
  "indexmap",
- "mtu",
- "neqo-common",
+ "mtu 0.4.1 (git+https://github.com/mozilla/neqo?tag=v0.35.0)",
+ "neqo-common 0.35.0",
+ "nss-rs",
+ "qlog",
+ "rustc-hash",
+ "serde",
+ "serde_with",
+ "smallvec",
+ "strum",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "neqo-transport"
+version = "0.36.0"
+source = "git+https://github.com/mozilla/neqo?tag=v0.36.0#e1666352c12a249dacb37927643985e76b7936c1"
+dependencies = [
+ "enum-map",
+ "enumset",
+ "indexmap",
+ "mtu 0.4.1 (git+https://github.com/mozilla/neqo?tag=v0.36.0)",
+ "neqo-common 0.36.0",
  "nss-rs",
  "qlog",
  "rustc-hash",

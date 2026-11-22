@@ -22,6 +22,7 @@
 - The HTTP/1.x server now allows responses to intentionally set `Connection: close` to close HTTP/1.x connections.
 - The HTTP/1.x server now checks the sent response body size against declared `Content-Length` value.
 - The HTTP/1.x server now enforces a chunk size limit of 4096 bytes (similar to `net/http` in Go).
+- The HTTP/1.x server now has an `allow_pipelining` option to refuse pipelined requests (pipelining stays allowed by default).
 - The HTTP/1.x server now returns 431 error by default when requests sent too large header block instead of 400.
 - The HTTP/2 server now immediately marks streams exceeding the concurrent stream limit as closed.
 - The HTTP/2 server now properly advertises maximum header list size setting.

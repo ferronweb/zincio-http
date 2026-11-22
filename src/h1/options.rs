@@ -20,6 +20,7 @@ pub struct Http1Options {
     pub(crate) send_continue_response: bool,
     pub(crate) enable_early_hints: bool,
     pub(crate) enable_vectored_write: bool,
+    pub(crate) allow_pipelining: bool,
 }
 
 impl Http1Options {
@@ -34,6 +35,7 @@ impl Http1Options {
     /// | `send_continue_response` | `true` |
     /// | `enable_early_hints` | `false` |
     /// | `enable_vectored_write` | `true` |
+    /// | `allow_pipelining` | `true` |
     pub fn new() -> Self {
         Self {
             max_header_size: 16384,
@@ -43,6 +45,7 @@ impl Http1Options {
             send_continue_response: true,
             enable_early_hints: false,
             enable_vectored_write: true,
+            allow_pipelining: true,
         }
     }
 
@@ -113,6 +116,19 @@ impl Http1Options {
     /// Defaults to **`false`**.
     pub fn enable_early_hints(mut self, enable: bool) -> Self {
         self.enable_early_hints = enable;
+        self
+    }
+
+    /// Controls whether pipelined requests are served (RFC 9112 Section
+    /// 9.3.2).
+    ///
+    /// When disabled, a connection on which the next request has already
+    /// arrived when a response is sent is closed after that response, with
+    /// `Connection: close`, and the connection ends with an `InvalidData`
+    /// I/O error; the pipelined request is not read. Defaults to
+    /// **`true`**.
+    pub fn allow_pipelining(mut self, allow: bool) -> Self {
+        self.allow_pipelining = allow;
         self
     }
 }

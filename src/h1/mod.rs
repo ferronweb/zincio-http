@@ -586,6 +586,17 @@ where
                 keep_alive = false;
             }
 
+            // The next request has arrived before this response is sent: the
+            // client pipelines. Whitespace before a request is ignored, as by
+            // `get_head`, and after an upgrade the bytes are not a request.
+            let pipelining_refused = keep_alive
+                && !self.options.allow_pipelining
+                && !upgraded.load(std::sync::atomic::Ordering::Relaxed)
+                && self.read_buf.iter().any(|b| !b.is_ascii_whitespace());
+            if pipelining_refused {
+                keep_alive = false;
+            }
+
             let mut was_upgraded = false;
             if upgraded.load(std::sync::atomic::Ordering::Relaxed) {
                 was_upgraded = true;
@@ -610,6 +621,13 @@ where
 
             self.write_response(response, version, write_trailers, is_head, &mut zerocopy)
                 .await?;
+
+            if pipelining_refused {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pipelined request refused",
+                ));
+            }
 
             if was_upgraded {
                 // HTTP upgrade

@@ -572,6 +572,74 @@ async fn test_http_pipelining() {
 }
 
 #[tokio::test]
+async fn test_http_pipelining_refused() {
+    on_local(async {
+        let (response, result) = round_trip_with(
+            4096,
+            Http1Options::new()
+                .header_read_timeout(None)
+                .allow_pipelining(false),
+            |req| async move {
+                let path = req.uri().path().to_owned();
+                let _ = req.into_body().collect().await;
+                Ok::<_, http::Error>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(Full::new(Bytes::from(path.into_bytes())))
+                        .unwrap(),
+                )
+            },
+            concat!(
+                "GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .as_bytes(),
+        )
+        .await;
+
+        // Only the first request is answered, and the connection closed.
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text:?}");
+        assert!(
+            text.to_ascii_lowercase().contains("connection: close\r\n"),
+            "{text:?}"
+        );
+        assert!(text.ends_with("/first"), "{text:?}");
+        assert!(!text.contains("/second"), "{text:?}");
+        assert!(result.is_err());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_http_pipelining_refused_ignores_trailing_whitespace() {
+    on_local(async {
+        // Some clients send a CRLF after a request body; it is not a request.
+        let (response, result) = round_trip_with(
+            4096,
+            Http1Options::new()
+                .header_read_timeout(None)
+                .allow_pipelining(false),
+            |req| async {
+                let _ = req.into_body().collect().await;
+                Ok::<_, http::Error>(http::Response::new(Full::new(Bytes::new())))
+            },
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nhi\r\n",
+        )
+        .await;
+
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text:?}");
+        assert!(
+            !text.to_ascii_lowercase().contains("connection: close"),
+            "{text:?}"
+        );
+        result.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn test_early_hints_before_final_response() {
     on_local(async {
         let (response, result) = round_trip_with(

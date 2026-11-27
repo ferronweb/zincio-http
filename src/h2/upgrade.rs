@@ -15,7 +15,7 @@ use crate::upgrade_bridge::UpgradedSendStreamBridge;
 pub(super) fn pair(
     inner_rx: kanal::AsyncReceiver<super::stream::BodyMsg>,
     inner_tx: kanal::AsyncSender<super::stream::StreamMsg>,
-    reset_rx: kanal::AsyncReceiver<u32>,
+    reset_rx: crate::h2::stream::reset::ResetReceiver,
     wake_tx: kanal::AsyncSender<()>,
 ) -> (H2Upgraded, UpgradedSendStreamTask) {
     let (send_stream, rx, error_tx) = UpgradedSendStreamBridge::channel();
@@ -144,7 +144,7 @@ pub(super) struct UpgradedSendStreamTask {
     rx_fut: Option<Pin<Box<kanal::ReceiveFuture<'static, Box<[u8]>>>>>,
     rx: kanal::AsyncReceiver<Box<[u8]>>,
     error_tx: Option<oneshot::Sender<std::io::Error>>,
-    reset_rx: kanal::AsyncReceiver<u32>,
+    reset_rx: crate::h2::stream::reset::ResetReceiver,
     wake_tx: kanal::AsyncSender<()>,
     end: bool,
 }
@@ -185,14 +185,11 @@ impl UpgradedSendStreamTask {
                 return Poll::Ready(Ok(()));
             }
 
-            match std::pin::pin!(this.reset_rx.recv()).poll(cx) {
-                Poll::Ready(_) => {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "request stream reset",
-                    )))
-                }
-                Poll::Pending => {}
+            if this.reset_rx.poll_reset(cx).is_ready() {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "request stream reset",
+                )));
             }
 
             let rx_fut = if let Some(fut) = &mut this.rx_fut {

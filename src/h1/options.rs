@@ -20,6 +20,7 @@ pub struct Http1Options {
     pub(crate) send_continue_response: bool,
     pub(crate) enable_early_hints: bool,
     pub(crate) enable_vectored_write: bool,
+    pub(crate) client_eof_ends_request: bool,
 }
 
 impl Http1Options {
@@ -34,6 +35,7 @@ impl Http1Options {
     /// | `send_continue_response` | `true` |
     /// | `enable_early_hints` | `false` |
     /// | `enable_vectored_write` | `true` |
+    /// | `client_eof_ends_request` | `false` |
     pub fn new() -> Self {
         Self {
             max_header_size: 16384,
@@ -43,6 +45,7 @@ impl Http1Options {
             send_continue_response: true,
             enable_early_hints: false,
             enable_vectored_write: true,
+            client_eof_ends_request: false,
         }
     }
 
@@ -113,6 +116,25 @@ impl Http1Options {
     /// Defaults to **`false`**.
     pub fn enable_early_hints(mut self, enable: bool) -> Self {
         self.enable_early_hints = enable;
+        self
+    }
+
+    /// Controls whether the end of the connection while the handler runs
+    /// ends the request.
+    ///
+    /// When enabled, the connection is read on once the request body has
+    /// been read. If the client closes its side before the response, the
+    /// handler is dropped and the connection ends, as with a reset HTTP/2
+    /// stream; a handler waiting on a backend learns so that the client
+    /// left. A client that only shuts down its sending side and still
+    /// waits for the response, which HTTP/1.1 allows, then gets none: the
+    /// server can't tell the two apart without writing. A pipelined
+    /// request that arrives meanwhile is kept for later, and the connection
+    /// is no longer watched for this request.
+    ///
+    /// Defaults to **`false`**.
+    pub fn client_eof_ends_request(mut self, enable: bool) -> Self {
+        self.client_eof_ends_request = enable;
         self
     }
 }

@@ -536,13 +536,37 @@ where
                 let (response, mut body_fut) = match select_either {
                     futures_util::future::Either::Left((result, request_fut)) => {
                         result?;
-                        (
-                            match request_fut.await {
-                                futures_util::future::Either::Left((response, _)) => response,
-                                futures_util::future::Either::Right((_, _)) => unreachable!(),
-                            },
-                            None,
-                        )
+                        let watch = self.options.client_eof_ends_request;
+                        // The client sends nothing more for this request:
+                        // the end of the connection now means it left, and
+                        // the handler is dropped, as for a reset HTTP/2
+                        // stream. A pipelined request stays in the buffer
+                        // for the next round, and the watch ends.
+                        let client_left = async {
+                            if !watch {
+                                futures_util::future::pending::<()>().await;
+                            }
+                            match self.fill_buf().await {
+                                Ok(0) => {}
+                                Ok(read) => {
+                                    debug_assert!(read > 0);
+                                    futures_util::future::pending::<()>().await;
+                                }
+                                // A failed read is a client that is gone too.
+                                Err(err) => drop(err),
+                            }
+                        };
+                        let client_left = std::pin::pin!(client_left);
+                        match futures_util::future::select(request_fut, client_left).await {
+                            futures_util::future::Either::Left((answered, _)) => (
+                                match answered {
+                                    futures_util::future::Either::Left((response, _)) => response,
+                                    futures_util::future::Either::Right((_, _)) => unreachable!(),
+                                },
+                                None,
+                            ),
+                            futures_util::future::Either::Right(((), _)) => return Ok(()),
+                        }
                     }
                     futures_util::future::Either::Right((response, read_body_fut)) => (
                         match response {

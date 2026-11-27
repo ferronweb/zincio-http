@@ -18,6 +18,7 @@
 - Fixed "upgraded" (using extended CONNECT) HTTP/2 and HTTP/3 streams stalling when the server sends data without reading anything from the client (for example when using server-initiated push notifications).
 - Hardened HTTP/2 and HTTP/3 header compression table size setting handling
 - Improved 100 Continue response handling for HTTP/1.x
+- The HTTP/1.x server can now drop the request handler when the client closes the connection before the response (`Http1Options::client_eof_ends_request`, disabled by default), as the HTTP/2 server does for a reset stream.
 - The library now needs a `unstable-internals` Cargo feature (disabled by default) to expose unstable HTTP/1.x and HTTP/2 protocol internals (**breaking change**).
 - The library now accepts `http::StatusCode` instead of a boolean in the error handler function (**breaking change**).
 - The HTTP/1.x server now allows responses to intentionally set `Connection: close` to close HTTP/1.x connections.
